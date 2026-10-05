@@ -161,7 +161,10 @@ object GeminiService {
     ): Result<String> = withContext(Dispatchers.IO) {
         val cleanApiKey = apiKey.trim().removeSurrounding("\"").removeSurrounding("'").removePrefix("Bearer ").removePrefix("bearer ").trim()
         val rawCleanModel = modelName.trim().removePrefix("models/")
-        val cleanModel = if (rawCleanModel.isBlank()) "gemini-2.5-flash" else rawCleanModel
+        val cleanModel = when {
+            rawCleanModel.isBlank() || rawCleanModel.contains("gemini-2.0") || rawCleanModel.contains("gemini-1.5") || rawCleanModel.contains("gemini-3.8") || rawCleanModel.contains("gemini-3.7") || rawCleanModel.contains("gemini-3.6") -> "gemini-2.5-flash"
+            else -> rawCleanModel
+        }
         val baseUrl = "https://generativelanguage.googleapis.com/v1beta/models/$cleanModel"
         val fullResponse = StringBuilder()
 
@@ -185,7 +188,7 @@ object GeminiService {
                 put("topP", 0.95)
                 put("topK", 40)
                 put("maxOutputTokens", if (isBuildMode) 65536 else 8192)
-                if (isBuildMode) {
+                if (isBuildMode && cleanModel.contains("thinking", ignoreCase = true)) {
                     val thinkingConfig = JSONObject().apply {
                         put("thinkingBudget", -1)
                     }

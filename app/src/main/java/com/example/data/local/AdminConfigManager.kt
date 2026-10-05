@@ -40,7 +40,7 @@ data class LimitCheckResult(
 data class AdminGlobalConfig(
     val defaultApiKey: String = "",
     val defaultProvider: String = "Gemini",
-    val defaultModel: String = "gemini-2.0-flash",
+    val defaultModel: String = "gemini-2.5-flash",
     val testingQuotaPerUser: Int = 10,
     val chatLimitPerUser: Int = 20,
     val imageLimitPerUser: Int = 5,

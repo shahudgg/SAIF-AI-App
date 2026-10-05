@@ -158,83 +158,58 @@ CORE OPERATING DIRECTIVES:
         fun resolveModels(prov: String, preferredModel: String = ""): List<String> {
             val list = mutableListOf<String>()
             val rawPref = preferredModel.trim()
+
+            // 1. If preferredModel is provided and matches this provider or this is the configured provider
             if (rawPref.isNotBlank()) {
-                list.add(rawPref)
-            }
-
-            // In build mode, prioritize user's buildModel if specified
-            if (isBuildMode && state.buildModel.isNotBlank() && rawPref.isBlank()) {
-                val bModel = state.buildModel.trim()
-                val isModelCompatible = when {
-                    prov.contains("Gemini", true) -> bModel.contains("gemini", true)
-                    prov.contains("Groq", true) -> bModel.contains("llama", true) || bModel.contains("mixtral", true)
-                    prov.contains("OpenAI", true) -> bModel.contains("gpt", true) || bModel.contains("o1", true) || bModel.contains("o3", true)
-                    prov.contains("Anthropic", true) -> bModel.contains("claude", true)
-                    prov.contains("DeepSeek", true) -> bModel.contains("deepseek", true)
-                    else -> true
+                val matchesProvider = when {
+                    prov.equals("Gemini", ignoreCase = true) -> rawPref.contains("gemini", ignoreCase = true)
+                    prov.equals("Groq", ignoreCase = true) -> rawPref.contains("llama", ignoreCase = true) || rawPref.contains("mixtral", ignoreCase = true) || rawPref.contains("gemma", ignoreCase = true) || rawPref.contains("qwen", ignoreCase = true) || rawPref.contains("deepseek", ignoreCase = true)
+                    prov.equals("OpenRouter", ignoreCase = true) -> rawPref.contains("/")
+                    prov.equals("OpenAI", ignoreCase = true) -> rawPref.contains("gpt", ignoreCase = true) || rawPref.contains("o1", ignoreCase = true) || rawPref.contains("o3", ignoreCase = true)
+                    prov.equals("DeepSeek", ignoreCase = true) -> rawPref.contains("deepseek", ignoreCase = true)
+                    prov.equals("Anthropic", ignoreCase = true) -> rawPref.contains("claude", ignoreCase = true)
+                    else -> prov.equals(state.providerName, ignoreCase = true)
                 }
-                if (isModelCompatible) {
-                    list.add(bModel)
+                if (matchesProvider || prov.equals(state.providerName, ignoreCase = true)) {
+                    list.add(rawPref)
                 }
             }
 
-            // Only inject user's activeModel if it actually belongs to this provider
+            // 2. Also prioritize state.activeModel if this prov is the user's selected provider
             val userModel = state.activeModel.trim()
-            if (userModel.isNotBlank() && preferredModel.isBlank()) {
-                val isModelCompatible = when {
-                    prov.contains("Gemini", true) -> userModel.contains("gemini", true)
-                    prov.contains("Groq", true) -> userModel.contains("llama", true) || userModel.contains("mixtral", true) || userModel.contains("gemma", true)
-                    prov.contains("OpenAI", true) -> userModel.contains("gpt", true) || userModel.contains("o1", true) || userModel.contains("o3", true)
-                    prov.contains("Anthropic", true) -> userModel.contains("claude", true)
-                    prov.contains("DeepSeek", true) -> userModel.contains("deepseek", true)
-                    prov.contains("InceptionLabs", true) -> userModel.contains("merlin", true) || userModel.contains("inception", true)
-                    prov.contains("Atria", true) -> userModel.contains("atria", true) || userModel.contains("asi", true)
-                    prov.contains("OpenRouter", true) -> true
-                    prov.contains("OpenCode", true) -> userModel.contains("glm", true) || userModel.contains("kimi", true) || userModel.contains("minimax", true) || userModel.contains("mimo", true)
-                    else -> true
-                }
-                if (isModelCompatible) {
+            if (userModel.isNotBlank() && prov.equals(state.providerName, ignoreCase = true)) {
+                if (!list.contains(userModel)) {
                     list.add(userModel)
+                }
+            }
+
+            // In build mode, also include user's buildModel if specified
+            if (isBuildMode && state.buildModel.isNotBlank() && prov.equals(state.providerName, ignoreCase = true)) {
+                val bm = state.buildModel.trim()
+                if (!list.contains(bm)) {
+                    list.add(bm)
                 }
             }
 
             val standardModels = when {
                 prov.contains("OpenCode", ignoreCase = true) -> listOf("glm-5.1", "deepseek-v4-flash", "kimi-k2.6", "minimax-m2.7", "ling-3.0-flash-fin-free", "mimo-v2.5-free", "claude-sonnet-4-5", "nemotron-3-ultra-free")
-                prov.equals("Gemini", ignoreCase = true) -> if (isBuildMode) {
-                    listOf("gemini-3.8-flash", "gemini-3.7-flash", "gemini-3.6-flash", "gemini-3.5-flash", "gemini-flash-latest")
-                } else {
-                    GeminiModels.CHAT_FALLBACKS
-                }
-                prov.equals("OpenRouter", ignoreCase = true) -> if (isVisionRequest) visionModelsOpenRouter else if (isBuildMode) {
-                    // Never fall back to 7B/8B models for builds; use strong coding models
-                    listOf("google/gemini-2.5-pro", "anthropic/claude-3.5-sonnet", "qwen/qwen-2.5-coder-32b-instruct", "meta-llama/llama-3.3-70b-instruct", "deepseek/deepseek-chat", "google/gemini-2.0-flash-001")
-                } else {
-                    listOf("google/gemini-2.0-flash-001", "meta-llama/llama-3.3-70b-instruct", "qwen/qwen-2.5-coder-32b-instruct", "deepseek/deepseek-chat", "meta-llama/llama-3.1-8b-instruct:free", "mistralai/mistral-7b-instruct:free")
-                }
-                prov.equals("Groq", ignoreCase = true) -> if (isVisionRequest) visionModelsGroq else if (isBuildMode) {
-                    // Never fall back to 7B/8B models for builds
-                    listOf("llama-3.3-70b-versatile", "mixtral-8x7b-32768")
-                } else {
-                    listOf("llama-3.3-70b-versatile", "llama-3.1-8b-instant", "mixtral-8x7b-32768")
-                }
-                prov.equals("OpenAI", ignoreCase = true) -> if (isVisionRequest) listOf("gpt-4o", "gpt-4o-mini") else if (isBuildMode) {
-                    listOf("gpt-4o", "gpt-4-turbo", "o3-mini", "gpt-4o-mini")
-                } else {
-                    listOf("gpt-4o-mini", "gpt-4o", "gpt-4-turbo", "o3-mini")
-                }
+                prov.equals("Gemini", ignoreCase = true) -> GeminiModels.CHAT_FALLBACKS
+                prov.equals("OpenRouter", ignoreCase = true) -> if (isVisionRequest) visionModelsOpenRouter else listOf("meta-llama/llama-3.3-70b-instruct:free", "google/gemini-2.0-flash-001", "qwen/qwen-2.5-coder-32b-instruct:free", "meta-llama/llama-3.1-8b-instruct:free", "deepseek/deepseek-chat")
+                prov.equals("Groq", ignoreCase = true) -> if (isVisionRequest) visionModelsGroq else fallbackModelsGroq
+                prov.equals("OpenAI", ignoreCase = true) -> if (isVisionRequest) listOf("gpt-4o", "gpt-4o-mini") else listOf("gpt-4o-mini", "gpt-4o", "gpt-4-turbo", "o3-mini")
                 prov.contains("InceptionLabs", ignoreCase = true) || prov.contains("inceptionlabs", ignoreCase = true) -> listOf("merlin-32k", "merlin", "merlin-code", "inception-3")
                 prov.contains("Atria", ignoreCase = true) || prov.contains("atria-asi", ignoreCase = true) -> listOf("atria-1", "asi-chat", "atria-asi-v1", "atria-instruct")
-                prov.equals("DeepSeek", ignoreCase = true) -> if (isBuildMode) listOf("deepseek-coder", "deepseek-chat", "deepseek-reasoner") else listOf("deepseek-chat", "deepseek-coder", "deepseek-reasoner")
+                prov.equals("DeepSeek", ignoreCase = true) -> listOf("deepseek-chat", "deepseek-coder", "deepseek-reasoner")
                 prov.equals("Anthropic", ignoreCase = true) -> listOf("claude-3-5-sonnet-20241022", "claude-3-haiku-20240307")
-                prov.equals("Mistral", ignoreCase = true) -> if (isBuildMode) listOf("codestral-latest", "mistral-large-latest", "mistral-small-latest") else listOf("mistral-large-latest", "mistral-small-latest", "codestral-latest")
+                prov.equals("Mistral", ignoreCase = true) -> listOf("mistral-large-latest", "mistral-small-latest", "codestral-latest")
                 prov.equals("xAI", ignoreCase = true) -> listOf("grok-2-latest", "grok-beta")
                 prov.equals("Together", ignoreCase = true) -> listOf("meta-llama/Llama-3.3-70B-Instruct-Turbo", "deepseek-ai/DeepSeek-V3")
                 prov.equals("Perplexity", ignoreCase = true) -> listOf("sonar-pro", "sonar")
-                prov.equals("Cerebras", ignoreCase = true) -> if (isBuildMode) listOf("llama-3.3-70b") else listOf("llama-3.3-70b", "llama3.1-8b")
+                prov.equals("Cerebras", ignoreCase = true) -> listOf("llama-3.3-70b", "llama3.1-8b")
                 prov.equals("Fireworks", ignoreCase = true) -> listOf("accounts/fireworks/models/llama-v3p3-70b-instruct", "accounts/fireworks/models/deepseek-v3")
                 prov.equals("Sambanova", ignoreCase = true) -> listOf("Qwen2.5-Coder-32B-Instruct", "Meta-Llama-3.3-70B-Instruct")
                 prov.equals("SiliconFlow", ignoreCase = true) -> listOf("Qwen/Qwen2.5-72B-Instruct", "deepseek-ai/DeepSeek-V3")
-                else -> listOf("gpt-4o", "llama-3.3-70b-versatile")
+                else -> listOf("gemini-2.5-flash", "gpt-4o-mini", "llama-3.3-70b-versatile")
             }
             list.addAll(standardModels)
             return list.distinct()
@@ -290,7 +265,7 @@ CORE OPERATING DIRECTIVES:
                 trimmed.length >= 35 -> if (state.providerName.contains("OpenCode", ignoreCase = true)) "OpenCode.ai" else if (state.providerName.isNotBlank() && state.providerName != "Gemini") state.providerName else "Gemini"
                 else -> state.providerName
             }
-            attemptsList.add(ProviderAttempt(detectedProvider, trimmed, resolveModels(detectedProvider)))
+            attemptsList.add(ProviderAttempt(detectedProvider, trimmed, resolveModels(detectedProvider, state.activeModel)))
             // If generic sk- key, add OpenRouter, DeepSeek, and OpenAI fallbacks
             if (trimmed.startsWith("sk-") && !trimmed.startsWith("sk-or-") && !trimmed.startsWith("sk-ant-") && !state.providerName.contains("OpenCode", ignoreCase = true)) {
                 if (detectedProvider != "OpenRouter") {
@@ -720,23 +695,44 @@ CORE OPERATING DIRECTIVES:
             if (effectiveProvider.equals("Gemini", ignoreCase = true)) {
                 val url = "https://generativelanguage.googleapis.com/v1beta/models?key=$trimmedKey"
                 val request = Request.Builder().url(url).get().build()
-                val response = client.newCall(request).execute()
-                if (response.isSuccessful) {
+                val response = try { client.newCall(request).execute() } catch (e: Exception) { null }
+                if (response != null && (response.code == 400 || response.code == 401 || response.code == 403)) {
+                    val bodyStr = response.body?.string() ?: ""
+                    val errDetail = try {
+                        JSONObject(bodyStr).optJSONObject("error")?.optString("message") ?: "Invalid API Key"
+                    } catch (e: Exception) { "Invalid API Key (${response.code})" }
+                    throw IllegalStateException("Gemini API Error: $errDetail. Please check your key from Google AI Studio.")
+                }
+                if (response != null && response.isSuccessful) {
                     val json = JSONObject(response.body?.string() ?: "{}")
                     val modelsArray = json.optJSONArray("models") ?: JSONArray()
                     val resultList = mutableListOf<Pair<String, Boolean>>()
                     for (i in 0 until modelsArray.length()) {
                         val modelObj = modelsArray.getJSONObject(i)
                         val name = modelObj.optString("name", "").replace("models/", "")
-                        // For Gemini, we might treat pro as paid and flash as free for categorization
-                        val isFree = name.contains("flash") || name.contains("gemini-1.5") || name.contains("gemini-2.0") || name.contains("gemini-2.5")
-                        if (name.isNotEmpty()) {
-                            resultList.add(Pair(name, isFree))
+                        if (name.isBlank()) continue
+                        if (name.contains("embedding") || name.contains("imagen") || name.contains("aqa") || name.contains("learnlm")) continue
+                        val methods = modelObj.optJSONArray("supportedGenerationMethods")
+                        if (methods != null) {
+                            var canGen = false
+                            for (m in 0 until methods.length()) {
+                                if (methods.optString(m) == "generateContent") { canGen = true; break }
+                            }
+                            if (!canGen) continue
                         }
+                        val isFree = name.contains("flash") || name.contains("lite") || name.contains("latest") || !name.contains("pro")
+                        resultList.add(Pair(name, isFree))
                     }
-                    return@withContext resultList.sortedByDescending { it.second }
+                    if (resultList.isNotEmpty()) {
+                        return@withContext resultList.sortedWith(
+                            compareByDescending<Pair<String, Boolean>> { it.second }.thenBy { it.first }
+                        )
+                    }
                 }
-                return@withContext emptyList()
+                // Fallback verified active Gemini models with free tier status
+                return@withContext GeminiModels.CHAT_FALLBACKS.map {
+                    Pair(it, it.contains("flash") || it.contains("lite") || it.contains("latest"))
+                }
             }
             
             if (effectiveProvider.contains("OpenCode", ignoreCase = true)) {
@@ -890,6 +886,34 @@ CORE OPERATING DIRECTIVES:
             }
 
             // Fallbacks for providers if models list API endpoint is not implemented or fails
+            if (effectiveProvider.contains("OpenRouter", true)) {
+                return@withContext listOf(
+                    Pair("meta-llama/llama-3.3-70b-instruct:free", true),
+                    Pair("meta-llama/llama-3.1-8b-instruct:free", true),
+                    Pair("google/gemini-2.0-flash-exp:free", true),
+                    Pair("qwen/qwen-2.5-coder-32b-instruct:free", true),
+                    Pair("mistralai/mistral-7b-instruct:free", true),
+                    Pair("deepseek/deepseek-chat", false),
+                    Pair("google/gemini-2.0-flash-001", false),
+                    Pair("anthropic/claude-3.5-sonnet", false)
+                )
+            }
+            if (effectiveProvider.contains("Groq", true)) {
+                return@withContext listOf(
+                    Pair("llama-3.3-70b-versatile", true),
+                    Pair("llama-3.1-8b-instant", true),
+                    Pair("mixtral-8x7b-32768", true),
+                    Pair("gemma2-9b-it", true)
+                )
+            }
+            if (effectiveProvider.contains("OpenAI", true)) {
+                return@withContext listOf(
+                    Pair("gpt-4o-mini", false),
+                    Pair("gpt-4o", false),
+                    Pair("gpt-4-turbo", false),
+                    Pair("o3-mini", false)
+                )
+            }
             if (effectiveProvider.contains("DeepSeek", true)) {
                 return@withContext listOf(
                     Pair("deepseek-chat", true),

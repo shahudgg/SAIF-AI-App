@@ -8,14 +8,14 @@ import org.json.JSONObject
 data class ProviderState(
     var providerName: String = "Gemini",
     var apiKeys: List<String> = emptyList(),
-    var activeModel: String = "gemini-2.0-flash",
-    var buildModel: String = "gemini-2.5-pro",
+    var activeModel: String = "gemini-2.5-flash",
+    var buildModel: String = "gemini-2.5-flash",
     var currentKeyIndex: Int = 0
 )
 
 object ProviderSettingsManager {
     private const val PREFS_NAME = "ProviderSettingsPrefs"
-    private const val KEY_STATE = "provider_state_v6"
+    private const val KEY_STATE = "provider_state_v7"
     private var prefs: SharedPreferences? = null
 
     fun init(context: Context) {
@@ -24,13 +24,17 @@ object ProviderSettingsManager {
 
     private fun sanitizeModelName(model: String): String {
         val trimmed = model.trim()
-        if (trimmed.isBlank()) return "gemini-2.0-flash"
+        if (trimmed.isBlank() || trimmed.contains("gemini-2.0") || trimmed.contains("gemini-1.5") || trimmed.contains("gemini-3.8") || trimmed.contains("gemini-3.7") || trimmed.contains("gemini-3.6")) {
+            return "gemini-2.5-flash"
+        }
         return trimmed
     }
 
     private fun sanitizeBuildModelName(model: String): String {
         val trimmed = model.trim()
-        if (trimmed.isBlank()) return "gemini-2.5-pro"
+        if (trimmed.isBlank() || trimmed.contains("gemini-2.0") || trimmed.contains("gemini-1.5") || trimmed.contains("gemini-3.8") || trimmed.contains("gemini-3.7") || trimmed.contains("gemini-3.6")) {
+            return "gemini-2.5-flash"
+        }
         return trimmed
     }
 
@@ -44,16 +48,16 @@ object ProviderSettingsManager {
         if (jsonStr == null) {
             return ProviderState(
                 providerName = "Gemini",
-                activeModel = "gemini-2.0-flash",
-                buildModel = "gemini-2.5-pro",
+                activeModel = "gemini-2.5-flash",
+                buildModel = "gemini-2.5-flash",
                 apiKeys = emptyList()
             )
         }
         return try {
             val json = JSONObject(jsonStr)
             val parsedKeys = jsonArrayToList(json.optJSONArray("apiKeys")).filter { it.isNotBlank() }
-            val rawModel = json.optString("activeModel", "gemini-2.0-flash")
-            val rawBuildModel = json.optString("buildModel", "gemini-2.5-pro")
+            val rawModel = json.optString("activeModel", "gemini-2.5-flash")
+            val rawBuildModel = json.optString("buildModel", "gemini-2.5-flash")
             var savedProvider = json.optString("providerName", "Gemini")
 
             // Clean only template dummy placeholders, preserve all real user API keys
@@ -77,8 +81,8 @@ object ProviderSettingsManager {
         } catch (e: Exception) {
             ProviderState(
                 providerName = "Gemini",
-                activeModel = "gemini-2.0-flash",
-                buildModel = "gemini-2.5-pro",
+                activeModel = "gemini-2.5-flash",
+                buildModel = "gemini-2.5-flash",
                 apiKeys = emptyList()
             )
         }

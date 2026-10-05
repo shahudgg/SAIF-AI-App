@@ -152,30 +152,6 @@ fun AiProviderSettingsInline() {
             }
         }
 
-        var showUniversalSettingsModal by remember { mutableStateOf(false) }
-        Button(
-            onClick = { showUniversalSettingsModal = true },
-            colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF00A86B)),
-            shape = RoundedCornerShape(12.dp),
-            modifier = Modifier.fillMaxWidth()
-        ) {
-            Icon(Icons.Default.Tune, contentDescription = null, modifier = Modifier.size(18.dp), tint = Color.White)
-            Spacer(modifier = Modifier.width(8.dp))
-            Text("Universal Multi-API Engine Settings", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 13.sp)
-        }
-
-        if (showUniversalSettingsModal) {
-            AISettingsDialog(
-                isDarkTheme = true,
-                onDismiss = { showUniversalSettingsModal = false },
-                onConfigSaved = {
-                    state = ProviderSettingsManager.loadState()
-                    apiKeys = if (state.apiKeys.isEmpty()) listOf("") else state.apiKeys
-                    activeModel = state.activeModel
-                }
-            )
-        }
-
         // API Provider Selector
         Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
             Text("API Provider", fontSize = 13.sp, color = SaifTheme.colors.textSecondary)
@@ -248,7 +224,7 @@ fun AiProviderSettingsInline() {
                                     "OpenRouter" -> "meta-llama/llama-3.1-8b-instruct:free"
                                     "Groq" -> "llama-3.3-70b-versatile"
                                     "OpenAI" -> "gpt-4o-mini"
-                                    "Gemini" -> "gemini-2.0-flash"
+                                    "Gemini" -> "gemini-2.5-flash"
                                     else -> "glm-5.1"
                                 } 
                             }
@@ -335,7 +311,7 @@ fun AiProviderSettingsInline() {
                             if (autoProv != null && autoProv != providerName) {
                                 providerName = autoProv
                                 activeModel = when (autoProv) {
-                                    "Gemini" -> "gemini-2.0-flash"
+                                    "Gemini" -> "gemini-2.5-flash"
                                     "Groq" -> "llama-3.3-70b-versatile"
                                     "OpenRouter" -> "google/gemini-2.0-flash-001"
                                     "OpenCode.ai" -> "glm-5.1"
@@ -484,174 +460,143 @@ fun AiProviderSettingsInline() {
             Text(fetchError!!, color = Color.Red, fontSize = 12.sp)
         }
 
-        // Quick Select Model
-        AnimatedVisibility(visible = fetchedModels.isNotEmpty()) {
-            Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+        // Display fetched models ONLY after user enters key and fetches models
+        if (fetchedModels.isNotEmpty()) {
+            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.SpaceBetween,
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Text("Popular Models", fontSize = 13.sp, color = SaifTheme.colors.textSecondary)
-                    Text("${fetchedModels.size} available", fontSize = 11.sp, color = Color(0xFFA855F7))
+                    val freeCount = fetchedModels.count { it.second }
+                    Text(
+                        text = "Available Models ($freeCount FREE)",
+                        fontSize = 13.5.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = SaifTheme.colors.textPrimary
+                    )
+                    Text(
+                        text = "Tap to select",
+                        fontSize = 11.5.sp,
+                        color = Color(0xFF10B981),
+                        fontWeight = FontWeight.Medium
+                    )
                 }
+
+                // Show free models first, then other models
+                val freeModels = fetchedModels.filter { it.second }
+                val paidModels = fetchedModels.filter { !it.second }
+                val displayList = (freeModels + paidModels).take(20)
 
                 FlowRow(
                     horizontalArrangement = Arrangement.spacedBy(8.dp),
                     verticalArrangement = Arrangement.spacedBy(8.dp),
                     modifier = Modifier.fillMaxWidth()
                 ) {
-                    val displayedChips = if (providerName.contains("OpenCode", ignoreCase = true)) {
-                        val preferred = listOf("glm-5.1", "deepseek-v4-flash", "kimi-k2.6", "minimax-m2.7", "ling-3.0-flash-fin-free", "mimo-v2.5-free", "claude-sonnet-4-5", "big-pickle")
-                        val matched = preferred.mapNotNull { p -> fetchedModels.firstOrNull { it.first == p } }
-                        val others = fetchedModels.filter { it.second && !matched.contains(it) }.take(4)
-                        (matched + others).take(10)
-                    } else {
-                        val freeModels = fetchedModels.filter { it.second }.take(8)
-                        if (freeModels.isNotEmpty()) freeModels else fetchedModels.take(8)
-                    }
-                    
-                    displayedChips.forEach { (name, isFree) ->
-                        val isSelected = activeModel == name
+                    displayList.forEach { (name, isFree) ->
+                        val isSelected = activeModel.equals(name, ignoreCase = true)
                         Surface(
-                            onClick = { 
+                            onClick = {
                                 activeModel = name
+                                buildModel = name
                                 val cleanedKeys = apiKeys.map { it.trim() }.filter { it.isNotBlank() }
                                 ProviderSettingsManager.saveState(ProviderState(
                                     providerName = providerName,
                                     apiKeys = cleanedKeys,
                                     activeModel = name,
+                                    buildModel = name,
                                     currentKeyIndex = 0
                                 ))
-                                saveSuccessMessage = "✓ Model switched to '$name'"
+                                saveSuccessMessage = "✓ Model selected: '$name'"
                             },
                             shape = RoundedCornerShape(8.dp),
-                            color = if (isSelected) PrimaryAccent else SaifTheme.colors.surfaceCard,
-                            border = BorderStroke(1.dp, if (isSelected) PrimaryAccent else SaifTheme.colors.textSecondary.copy(alpha=0.3f))
+                            color = if (isSelected) Color(0xFF10B981).copy(alpha = 0.22f) else SaifTheme.colors.surfaceCard,
+                            border = BorderStroke(
+                                if (isSelected) 2.dp else 1.dp,
+                                if (isSelected) Color(0xFF10B981) else if (isFree) Color(0xFF10B981).copy(alpha = 0.5f) else SaifTheme.colors.textSecondary.copy(alpha = 0.25f)
+                            )
                         ) {
                             Row(
                                 verticalAlignment = Alignment.CenterVertically,
-                                modifier = Modifier.padding(horizontal = 10.dp, vertical = 8.dp)
+                                modifier = Modifier.padding(horizontal = 10.dp, vertical = 7.dp)
                             ) {
-                                Text(name, color = SaifTheme.colors.textPrimary, fontSize = 12.sp, fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Normal)
+                                if (isSelected) {
+                                    Icon(
+                                        imageVector = Icons.Default.CheckCircle,
+                                        contentDescription = "Selected",
+                                        tint = Color(0xFF10B981),
+                                        modifier = Modifier.size(14.dp)
+                                    )
+                                    Spacer(modifier = Modifier.width(6.dp))
+                                }
+                                Text(
+                                    text = name,
+                                    color = if (isSelected) Color.White else SaifTheme.colors.textPrimary,
+                                    fontSize = 12.sp,
+                                    fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Normal
+                                )
                                 if (isFree) {
-                                    Spacer(modifier = Modifier.width(4.dp))
-                                    Text("FREE", color = if (isSelected) Color.White else Color(0xFF10B981), fontSize = 9.sp, fontWeight = FontWeight.Bold)
+                                    Spacer(modifier = Modifier.width(6.dp))
+                                    Surface(
+                                        color = if (isSelected) Color(0xFF10B981) else Color(0x2610B981),
+                                        shape = RoundedCornerShape(4.dp)
+                                    ) {
+                                        Text(
+                                            text = "FREE",
+                                            color = if (isSelected) Color.Black else Color(0xFF10B981),
+                                            fontSize = 9.sp,
+                                            fontWeight = FontWeight.ExtraBold,
+                                            modifier = Modifier.padding(horizontal = 5.dp, vertical = 2.dp)
+                                        )
+                                    }
                                 }
                             }
                         }
                     }
                 }
-                
-                // See all models
-                Surface(
-                    onClick = { showAllModelsDialog = true },
-                    shape = RoundedCornerShape(8.dp),
-                    color = Color(0xFF1E293B),
-                    border = BorderStroke(1.dp, Color(0xFF3B82F6).copy(alpha = 0.5f)),
-                    modifier = Modifier.fillMaxWidth()
-                ) {
-                    Row(
-                        modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically
+
+                if (fetchedModels.size > 20) {
+                    Surface(
+                        onClick = { showAllModelsDialog = true },
+                        shape = RoundedCornerShape(8.dp),
+                        color = Color(0xFF1E293B),
+                        border = BorderStroke(1.dp, Color(0xFF38BDF8).copy(alpha = 0.4f)),
+                        modifier = Modifier.fillMaxWidth()
                     ) {
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            Icon(Icons.AutoMirrored.Filled.List, contentDescription = null, tint = Color(0xFF38BDF8), modifier = Modifier.size(16.dp))
-                            Spacer(modifier = Modifier.width(8.dp))
-                            Text("Browse All Models (${fetchedModels.size} found)", color = Color(0xFF38BDF8), fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
+                        Row(
+                            modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Icon(Icons.AutoMirrored.Filled.List, contentDescription = null, tint = Color(0xFF38BDF8), modifier = Modifier.size(16.dp))
+                                Spacer(modifier = Modifier.width(8.dp))
+                                Text("Browse All Models (${fetchedModels.size} found)", color = Color(0xFF38BDF8), fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
+                            }
+                            Icon(Icons.AutoMirrored.Filled.ArrowForward, contentDescription = null, tint = Color(0xFF38BDF8), modifier = Modifier.size(16.dp))
                         }
-                        Icon(Icons.AutoMirrored.Filled.ArrowForward, contentDescription = null, tint = Color(0xFF38BDF8), modifier = Modifier.size(16.dp))
                     }
                 }
             }
         }
 
-        // Chat Model Name Input
-        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            Text("Selected Model (Used for Chatting)", fontSize = 13.sp, color = SaifTheme.colors.textSecondary)
+        // Selected Model Name Input
+        Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+            Text("Selected Model", fontSize = 12.sp, color = SaifTheme.colors.textSecondary)
             TextField(
                 value = activeModel,
                 onValueChange = { 
                     activeModel = it
-                    saveSuccessMessage = null
-                },
-                modifier = Modifier.fillMaxWidth().animateContentSize(),
-                shape = RoundedCornerShape(8.dp),
-                colors = TextFieldDefaults.colors(
-                    focusedContainerColor = SaifTheme.colors.surfaceCard,
-                    unfocusedContainerColor = SaifTheme.colors.surfaceCard,
-                    focusedIndicatorColor = Color.Transparent,
-                    unfocusedIndicatorColor = Color.Transparent,
-                    focusedTextColor = SaifTheme.colors.textPrimary,
-                    unfocusedTextColor = SaifTheme.colors.textPrimary
-                ),
-                singleLine = true
-            )
-        }
-
-        // Build Model Picker (Used for Saif AI Build & Autonomous Coder)
-        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Text("Build Model (Saif AI Build & App Creation)", fontSize = 13.sp, color = SaifTheme.colors.textSecondary)
-                Text("Default: Strongest", fontSize = 11.sp, color = Color(0xFF10B981))
-            }
-
-            // Quick select build chips
-            val buildPresets = listOf(
-                "gemini-2.5-pro",
-                "gemini-1.5-pro",
-                "gemini-2.5-flash",
-                "claude-3-5-sonnet-20241022",
-                "gpt-4o",
-                "deepseek-coder",
-                "qwen/qwen-2.5-coder-32b-instruct"
-            )
-
-            FlowRow(
-                horizontalArrangement = Arrangement.spacedBy(6.dp),
-                verticalArrangement = Arrangement.spacedBy(6.dp),
-                modifier = Modifier.fillMaxWidth()
-            ) {
-                buildPresets.forEach { preset ->
-                    val isSelected = buildModel.equals(preset, ignoreCase = true)
-                    Surface(
-                        onClick = {
-                            buildModel = preset
-                            saveSuccessMessage = null
-                        },
-                        shape = RoundedCornerShape(6.dp),
-                        color = if (isSelected) Color(0xFF0284C7) else SaifTheme.colors.surfaceCard,
-                        border = BorderStroke(1.dp, if (isSelected) Color(0xFF38BDF8) else SaifTheme.colors.textSecondary.copy(alpha = 0.25f))
-                    ) {
-                        Text(
-                            text = preset,
-                            color = if (isSelected) Color.White else SaifTheme.colors.textPrimary,
-                            fontSize = 11.5.sp,
-                            fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Normal,
-                            modifier = Modifier.padding(horizontal = 8.dp, vertical = 5.dp)
-                        )
-                    }
-                }
-            }
-
-            TextField(
-                value = buildModel,
-                onValueChange = {
                     buildModel = it
                     saveSuccessMessage = null
                 },
-                placeholder = { Text("Enter build model name (e.g. gemini-2.5-pro)", color = SaifTheme.colors.textSecondary, fontSize = 13.sp) },
+                placeholder = { Text("Model name", color = SaifTheme.colors.textSecondary, fontSize = 13.sp) },
                 modifier = Modifier.fillMaxWidth().animateContentSize(),
                 shape = RoundedCornerShape(8.dp),
                 colors = TextFieldDefaults.colors(
                     focusedContainerColor = SaifTheme.colors.surfaceCard,
                     unfocusedContainerColor = SaifTheme.colors.surfaceCard,
-                    focusedIndicatorColor = Color.Transparent,
+                    focusedIndicatorColor = Color(0xFF10B981),
                     unfocusedIndicatorColor = Color.Transparent,
                     focusedTextColor = SaifTheme.colors.textPrimary,
                     unfocusedTextColor = SaifTheme.colors.textPrimary
@@ -667,20 +612,22 @@ fun AiProviderSettingsInline() {
         // Save Button
         Button(
             onClick = {
-                val cleanedKeys = apiKeys.map { it.trim().replace("\\s+".toRegex(), "") }.filter { it.isNotBlank() }
+                val cleanedKeys = apiKeys.map { AIApiUtility.sanitizeKey(it) }.filter { it.isNotBlank() }
                 ProviderSettingsManager.saveState(ProviderState(
                     providerName = providerName,
                     apiKeys = cleanedKeys,
-                    activeModel = activeModel,
-                    buildModel = buildModel,
+                    activeModel = activeModel.trim(),
+                    buildModel = activeModel.trim(),
                     currentKeyIndex = 0
                 ))
-                saveSuccessMessage = "✓ Saved: $providerName (Chat: $activeModel | Build: $buildModel) is now active!"
+                saveSuccessMessage = "✓ Saved: $providerName ($activeModel) is now active!"
             },
             modifier = Modifier.fillMaxWidth().height(48.dp),
             shape = RoundedCornerShape(8.dp),
             colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF10B981))
         ) {
+            Icon(Icons.Default.Save, contentDescription = null, modifier = Modifier.size(18.dp), tint = Color.White)
+            Spacer(modifier = Modifier.width(8.dp))
             Text("Save Provider & Apply API", color = Color.White, fontSize = 15.sp, fontWeight = FontWeight.Bold)
         }
     }
@@ -752,6 +699,7 @@ fun AiProviderSettingsInline() {
                                 Surface(
                                     onClick = { 
                                         activeModel = name
+                                        buildModel = name
                                         showAllModelsDialog = false
                                         
                                         // Auto-save model selection
@@ -760,6 +708,7 @@ fun AiProviderSettingsInline() {
                                             providerName = providerName,
                                             apiKeys = cleanedKeys,
                                             activeModel = name,
+                                            buildModel = name,
                                             currentKeyIndex = 0
                                         ))
                                         saveSuccessMessage = "✓ Selected '$name' as active model"
