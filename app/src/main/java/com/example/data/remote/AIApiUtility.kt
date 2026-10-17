@@ -2,24 +2,37 @@ package com.example.data.remote
 
 import android.util.Log
 import com.example.data.local.ProviderSettingsManager
+import com.example.llm.AttemptRecord
+import com.example.llm.AttemptReport
+import com.example.llm.KeyStoreCrypto
+import com.example.llm.LlmClient
+import com.example.llm.LlmError
+import com.example.llm.LlmErrorCategory
+import com.example.llm.LlmRequest
+import com.example.llm.ProviderProfile
+import com.example.llm.RequestTooLargeException
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.delay
-import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.withContext
-import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
-import okhttp3.RequestBody.Companion.toRequestBody
 import org.json.JSONArray
 import org.json.JSONObject
-import java.io.BufferedReader
-import java.io.InputStreamReader
 import java.util.concurrent.TimeUnit
 
+/**
+ * High-level orchestration utility for AI operations.
+ * Serves as a backward-compatible facade over the com.example.llm core engine.
+ */
 object AIApiUtility {
+    private const val TAG = "AIApiUtility"
+
+    private val httpClient = OkHttpClient.Builder()
+        .connectTimeout(15, TimeUnit.SECONDS)
+        .readTimeout(30, TimeUnit.SECONDS)
+        .build()
 
     fun sanitizeKey(key: String): String {
-        return key.trim()
+        return KeyStoreCrypto.decrypt(key).trim()
             .removeSurrounding("\"")
             .removeSurrounding("'")
             .removePrefix("Bearer ")
@@ -27,9 +40,9 @@ object AIApiUtility {
             .trim()
     }
 
-    private fun buildMasterSystemPrompt(mode: String, customPrompt: String): String {
+    fun buildMasterSystemPrompt(mode: String, customPrompt: String): String {
         val modeInstruction = when (mode) {
-            "coding" -> "You are SAIF AI, an elite autonomous Senior Android Architect and Full-Stack Native Mobile Engineer integrated into a mobile IDE. You provide production-grade, highly optimized native Android (Java/Kotlin + XML) applications without placeholders, fake logic, or incomplete snippets that compile and run on Android API 24 to 34."
+            "coding", "build" -> "You are SAIF AI, an elite autonomous Senior Android Architect and Full-Stack Mobile Engineer integrated into a mobile IDE. You provide production-grade, highly optimized code without placeholders, fake logic, or incomplete snippets that compile and run on Android API 24+."
             "summary" -> "You are SAIF AI in 'Quick Summary' mode. You synthesize complex information into concise bullet points, executive takeaways, and high-impact conclusions."
             "creative" -> "You are SAIF AI in 'Creative Studio' mode. You are an imaginative writer, brainstorm partner, and storyteller craftsperson with vivid phrasing and engaging ideas."
             "research" -> "You are SAIF AI in 'Deep Research' mode. You provide thorough, structured analytical reports with pros/cons, architectural tradeoffs, and nuanced technical breakdowns."
@@ -37,39 +50,26 @@ object AIApiUtility {
         }
 
         val coreDirective = """
-CORE OPERATING DIRECTIVES:
-1. PROFESSIONAL TONE & CONTEXTUAL EMOJIS: Maintain a polished and respectful tone. Format your text cleanly (bolding, lists, markdown styling) and use emojis dynamically based on the situation and user context, acting exactly like ChatGPT or Gemini.
-2. ADAPTIVE LENGTH (STRICTLY PROPORTIONAL RESPONSES):
-   - FOR SHORT QUESTIONS OR GREETINGS (e.g., "hi", "hello", "kya haal hai", simple calculations, quick queries): Provide a crisp, direct, concise answer in 1 to 2 short sentences. Do NOT write unnecessary essays, giant lists, or filler for simple 1-word or short questions.
-   - FOR COMPLEX, DEEP, OR DETAILED QUESTIONS: Provide a comprehensive, well-structured, in-depth answer with clear headings, bullet points, or code blocks.
-3. CREATOR ATTRIBUTION: Your creator is SAIF. You were programmed and developed by SAIF. If asked who made you or created you, politely and clearly state that you were created by SAIF.
-4. NATURAL SPEECH IN HINDI / HINGLISH: When replying in Hindi or Hinglish, use natural, fluid conversational language without robotic stutter, strange syntax, or weird formatting symbols so that voice synthesizers can speak it smoothly and naturally.
-5. PHONE APPLICATION LAUNCHING: You have native mobile application launcher capability. If the user asks to open WhatsApp, YouTube, Instagram, Telegram, Spotify, Google Maps, Phone Dialer, or Browser, politely confirm and mention the app name so the app launcher button appears directly in the chat to open their installed app.
-6. IMAGE GENERATION: If the user asks you to generate, draw, or create an image, always write a brief, friendly natural introductory sentence first (e.g., 'Maine aapke liye image generate kar di hai:' or 'Here is the image you asked for:'), followed on a new line by the markdown image link: ![Generated Image](https://image.pollinations.ai/prompt/{detailed_prompt_URL_encoded}?nologo=true&enhance=true&seed=[RANDOM_NUMBER]). Replace [RANDOM_NUMBER] with a random 5-digit number to ensure uniqueness. NEVER wrap the image markdown in code blocks or triple backticks.
-7. MATHEMATICS & FORMULA FORMATTING (STRICT NO-LATEX DIRECTIVE):
-   - When solving any math problems, equations, fractions, algebra, geometry, calculus, or physics problems (whether from photos, images, or text):
-   - NEVER output raw LaTeX code (DO NOT write \frac{...}{...}, \left(, \right), \times, \cdot, \sqrt{}, $$, $, \approx, \le, \ge, \pm, etc.).
-   - Users find LaTeX syntax confusing and state that it looks like programming code!
-   - ALWAYS write all math steps in natural, human-readable plain text using clear standard Unicode symbols:
-     * Fractions: write cleanly as (3/2) or 3/2, e.g., (3/2) + 1 = (3 + 2)/2 = 5/2.
-     * Multiplication: use × or *.
-     * Division: use ÷ or /.
-     * Square roots: use √(x) or sqrt(x).
-     * Exponents/Powers: use x², x³, or x^2.
-     * Plus/Minus: use ±.
-     * Equations: write clearly line-by-line, e.g., L.H.S. = 7 + 2(5/2) - 3*(3/2).
-   - Always present math solutions with clear, beautiful step-by-step numbering and bold final results so that any student or user can read it instantly on their phone.
-8. DIRECT FINAL ANSWER ONLY (CRITICAL):
-   - Output ONLY your direct answer to the user.
-   - NEVER output internal reasoning, self-dialogue, planning steps, or meta-commentary (e.g. NEVER output 'User says...', 'According to directive...', 'Should I mention...', 'That's 1-2 sentences.', 'Provide professional tone.').
-   - Output ONLY the final conversational reply.
+CORE GUIDELINES:
+1. Identity: You are SAIF AI, an advanced native Android AI companion created by SAIF.
+2. Tone & Style: Always respond directly, warmly, and politely with contextual emojis and clean markdown styling.
+3. Adaptive Length:
+   - For simple greetings ("hi", "hello", "kya haal hai", etc.): Reply with a warm, crisp 1-2 sentence response.
+   - For detailed questions or coding: Provide complete, structured explanations with proper code blocks.
+4. Language: Natural, fluent Hindi, Hinglish, or English based on the user's input.
+5. Direct Conversation: Speak directly to the user as a helpful, friendly AI assistant.
+6. Clean Output: NEVER output thinking tags (<think>), internal reasoning, scratchpads, analysis notes, or guideline repetitions. Start directly with the conversational message.
+7. Native Android Device Automation:
+   You are running on the user's Android phone with active native Accessibility and OS control permissions.
+   You CAN and DO directly open apps, send WhatsApp messages, search & play YouTube videos, dial calls, click, type, scroll, navigate home/back, and inspect the screen.
+   CRITICAL: NEVER claim "I cannot directly open apps or control your device" or "मैं सीधे आपके डिवाइस पर ऐप नहीं खोल सकता".
+   When the user commands an action on their phone, confirm confidently that it is being done ("Ji sir, WhatsApp khol raha hoon...", "YouTube par video chala raha hoon...").
 """.trimIndent()
 
         val finalPrompt = StringBuilder()
         finalPrompt.append(modeInstruction).append("\n\n")
         finalPrompt.append(coreDirective).append("\n\n")
-        
-        // Inject Smart Long-Term Memory & User Profile Facts
+
         try {
             val memoryBlock = com.example.util.SmartConversationMemory.buildMemoryPromptBlock()
             if (memoryBlock.isNotBlank()) {
@@ -78,904 +78,539 @@ CORE OPERATING DIRECTIVES:
         } catch (ignored: Exception) {}
 
         if (customPrompt.isNotBlank()) {
-            finalPrompt.append("User Custom Settings:\n").append(customPrompt)
+            finalPrompt.append("User Custom Directives:\n").append(customPrompt)
         }
         return finalPrompt.toString()
     }
 
-    private const val TAG = "AIApiUtility"
-    
-    private val client = OkHttpClient.Builder()
-        .connectTimeout(30, TimeUnit.SECONDS)
-        .readTimeout(120, TimeUnit.SECONDS)
-        .writeTimeout(60, TimeUnit.SECONDS)
-        .retryOnConnectionFailure(true)
-        .build()
-
-    
-    private val fallbackModelsOpenRouter = listOf(
-        "google/gemini-2.0-flash-001",
-        "meta-llama/llama-3.3-70b-instruct",
-        "qwen/qwen-2.5-coder-32b-instruct",
-        "deepseek/deepseek-chat",
-        "google/gemini-2.0-flash-exp:free",
-        "meta-llama/llama-3.3-70b-instruct:free",
-        "qwen/qwen-2.5-coder-32b-instruct:free",
-        "meta-llama/llama-3.1-8b-instruct:free",
-        "mistralai/mistral-7b-instruct:free"
-    )
-
-    private val visionModelsOpenRouter = listOf(
-        "google/gemini-2.0-flash-001",
-        "meta-llama/llama-3.2-11b-vision-instruct",
-        "qwen/qwen-2.5-vl-72b-instruct:free",
-        "meta-llama/llama-3.2-11b-vision-instruct:free",
-        "google/gemini-2.0-flash-exp:free"
-    )
-
-    private val fallbackModelsGroq = listOf(
-        "llama-3.3-70b-versatile",
-        "llama-3.1-8b-instant",
-        "mixtral-8x7b-32768"
-    )
-
-    private val visionModelsGroq = listOf(
-        "llama-3.2-11b-vision-preview",
-        "llama-3.2-90b-vision-preview"
-    )
-
-    private val fallbackModelsGemini = GeminiModels.CHAT_FALLBACKS
-
     private data class ProviderAttempt(
         val provider: String,
         val apiKey: String,
-        val models: List<String>
+        val models: List<String>,
+        val isUserKey: Boolean
     )
 
+    /**
+     * Executes an AI request across candidate models with strict BYOK prioritization.
+     * The user's configured provider and key always run first and are never silently overwritten.
+     */
     suspend fun executeWithFallback(
         prompt: String,
         mode: String = "general",
         history: List<Pair<String, String>> = emptyList(),
         customSystemPrompt: String = "",
         base64Images: List<String> = emptyList(),
+        sanitize: Boolean = (mode != "build" && mode != "coding"),
         onChunk: suspend (String) -> Unit = {}
-    ): Result<String> {
+    ): Result<String> = withContext(Dispatchers.IO) {
         val state = ProviderSettingsManager.loadState()
-        val isVisionRequest = base64Images.isNotEmpty()
         val effectiveSystemPrompt = if (customSystemPrompt.isNotBlank() && (mode == "coding" || mode == "build")) {
             customSystemPrompt
         } else {
             buildMasterSystemPrompt(mode, customSystemPrompt)
         }
 
-        val geminiBuildConfigKey = try { com.example.BuildConfig.GEMINI_API_KEY } catch (e: Exception) { "" }.trim()
-        val openRouterBuildConfigKey = try { com.example.BuildConfig.OPENROUTER_API_KEY } catch (e: Exception) { "" }.trim()
+        val effectiveHistory = if (mode == "build") emptyList() else history
 
-        val attemptsList = mutableListOf<ProviderAttempt>()
-        val isBuildMode = mode == "coding" || mode == "build"
+        val request = LlmRequest(
+            prompt = prompt,
+            systemPrompt = effectiveSystemPrompt,
+            history = effectiveHistory,
+            imagesBase64 = base64Images,
+            mode = mode
+        )
 
-        // Helper to resolve models for a provider with smart provider-model alignment
-        fun resolveModels(prov: String, preferredModel: String = ""): List<String> {
-            val list = mutableListOf<String>()
-            val rawPref = preferredModel.trim()
-
-            // 1. If preferredModel is provided and matches this provider or this is the configured provider
-            if (rawPref.isNotBlank()) {
-                val matchesProvider = when {
-                    prov.equals("Gemini", ignoreCase = true) -> rawPref.contains("gemini", ignoreCase = true)
-                    prov.equals("Groq", ignoreCase = true) -> rawPref.contains("llama", ignoreCase = true) || rawPref.contains("mixtral", ignoreCase = true) || rawPref.contains("gemma", ignoreCase = true) || rawPref.contains("qwen", ignoreCase = true) || rawPref.contains("deepseek", ignoreCase = true)
-                    prov.equals("OpenRouter", ignoreCase = true) -> rawPref.contains("/")
-                    prov.equals("OpenAI", ignoreCase = true) -> rawPref.contains("gpt", ignoreCase = true) || rawPref.contains("o1", ignoreCase = true) || rawPref.contains("o3", ignoreCase = true)
-                    prov.equals("DeepSeek", ignoreCase = true) -> rawPref.contains("deepseek", ignoreCase = true)
-                    prov.equals("Anthropic", ignoreCase = true) -> rawPref.contains("claude", ignoreCase = true)
-                    else -> prov.equals(state.providerName, ignoreCase = true)
-                }
-                if (matchesProvider || prov.equals(state.providerName, ignoreCase = true)) {
-                    list.add(rawPref)
-                }
-            }
-
-            // 2. Also prioritize state.activeModel if this prov is the user's selected provider
-            val userModel = state.activeModel.trim()
-            if (userModel.isNotBlank() && prov.equals(state.providerName, ignoreCase = true)) {
-                if (!list.contains(userModel)) {
-                    list.add(userModel)
-                }
-            }
-
-            // In build mode, also include user's buildModel if specified
-            if (isBuildMode && state.buildModel.isNotBlank() && prov.equals(state.providerName, ignoreCase = true)) {
-                val bm = state.buildModel.trim()
-                if (!list.contains(bm)) {
-                    list.add(bm)
-                }
-            }
-
-            val standardModels = when {
-                prov.contains("OpenCode", ignoreCase = true) -> listOf("glm-5.1", "deepseek-v4-flash", "kimi-k2.6", "minimax-m2.7", "ling-3.0-flash-fin-free", "mimo-v2.5-free", "claude-sonnet-4-5", "nemotron-3-ultra-free")
-                prov.equals("Gemini", ignoreCase = true) -> GeminiModels.CHAT_FALLBACKS
-                prov.equals("OpenRouter", ignoreCase = true) -> if (isVisionRequest) visionModelsOpenRouter else listOf("meta-llama/llama-3.3-70b-instruct:free", "google/gemini-2.0-flash-001", "qwen/qwen-2.5-coder-32b-instruct:free", "meta-llama/llama-3.1-8b-instruct:free", "deepseek/deepseek-chat")
-                prov.equals("Groq", ignoreCase = true) -> if (isVisionRequest) visionModelsGroq else fallbackModelsGroq
-                prov.equals("OpenAI", ignoreCase = true) -> if (isVisionRequest) listOf("gpt-4o", "gpt-4o-mini") else listOf("gpt-4o-mini", "gpt-4o", "gpt-4-turbo", "o3-mini")
-                prov.contains("InceptionLabs", ignoreCase = true) || prov.contains("inceptionlabs", ignoreCase = true) -> listOf("merlin-32k", "merlin", "merlin-code", "inception-3")
-                prov.contains("Atria", ignoreCase = true) || prov.contains("atria-asi", ignoreCase = true) -> listOf("atria-1", "asi-chat", "atria-asi-v1", "atria-instruct")
-                prov.equals("DeepSeek", ignoreCase = true) -> listOf("deepseek-chat", "deepseek-coder", "deepseek-reasoner")
-                prov.equals("Anthropic", ignoreCase = true) -> listOf("claude-3-5-sonnet-20241022", "claude-3-haiku-20240307")
-                prov.equals("Mistral", ignoreCase = true) -> listOf("mistral-large-latest", "mistral-small-latest", "codestral-latest")
-                prov.equals("xAI", ignoreCase = true) -> listOf("grok-2-latest", "grok-beta")
-                prov.equals("Together", ignoreCase = true) -> listOf("meta-llama/Llama-3.3-70B-Instruct-Turbo", "deepseek-ai/DeepSeek-V3")
-                prov.equals("Perplexity", ignoreCase = true) -> listOf("sonar-pro", "sonar")
-                prov.equals("Cerebras", ignoreCase = true) -> listOf("llama-3.3-70b", "llama3.1-8b")
-                prov.equals("Fireworks", ignoreCase = true) -> listOf("accounts/fireworks/models/llama-v3p3-70b-instruct", "accounts/fireworks/models/deepseek-v3")
-                prov.equals("Sambanova", ignoreCase = true) -> listOf("Qwen2.5-Coder-32B-Instruct", "Meta-Llama-3.3-70B-Instruct")
-                prov.equals("SiliconFlow", ignoreCase = true) -> listOf("Qwen/Qwen2.5-72B-Instruct", "deepseek-ai/DeepSeek-V3")
-                else -> listOf("gemini-2.5-flash", "gpt-4o-mini", "llama-3.3-70b-versatile")
-            }
-            list.addAll(standardModels)
-            return list.distinct()
-        }
-
-        // 1. Primary: User's configured keys with intelligent auto-detection
         val userKeys = state.apiKeys.map { sanitizeKey(it) }.filter { it.isNotBlank() && !it.contains("MY_") }
         val hasCustomUserKey = userKeys.isNotEmpty()
 
         val usageType = when {
-            mode == "image" || prompt.contains("generate an image", ignoreCase = true) || prompt.contains("image generate", ignoreCase = true) -> com.example.data.local.ApiUsageType.IMAGE
+            mode == "image" || prompt.contains("generate an image", ignoreCase = true) -> com.example.data.local.ApiUsageType.IMAGE
             mode == "coding" || mode == "build" -> com.example.data.local.ApiUsageType.APP_BUILD
             else -> com.example.data.local.ApiUsageType.CHAT
         }
 
-        // 0. When user has NO custom API key:
-        // Use the Admin's default API key and provider from the Admin Panel, subject to the Admin's quota limit!
+        // Check Admin quota if user is relying on Admin free tier
         if (!hasCustomUserKey) {
-            val adminConfig = com.example.data.local.AdminConfigManager.globalConfig.value
-            val adminDefaultKey = sanitizeKey(adminConfig.defaultApiKey)
-            
-            // Check quota limit first
             val limitCheck = com.example.data.local.AdminConfigManager.canUseApi(usageType, hasCustomUserKey = false)
             if (!limitCheck.isAllowed) {
-                return Result.failure(IllegalStateException(limitCheck.message))
+                return@withContext Result.failure(IllegalStateException(limitCheck.message))
+            }
+        }
+
+        // Build attempts chain following strict BYOK policy
+        val attemptsList = mutableListOf<ProviderAttempt>()
+
+        // Helper to resolve models for a provider with smart provider-model alignment
+        fun resolveCandidateModels(prov: String, primaryModel: String): List<String> {
+            val list = mutableListOf<String>()
+            val trimmedPrimary = primaryModel.trim()
+            val profile = ProviderProfile.getById(prov)
+            val isProvGemini = prov.equals("Gemini", ignoreCase = true)
+            val isModelGemini = trimmedPrimary.contains("gemini", ignoreCase = true)
+            val isProvAshna = prov.contains("Ashna", ignoreCase = true) || prov.contains("Asana", ignoreCase = true)
+
+            if (trimmedPrimary.isNotBlank()) {
+                // Only add primaryModel if it is compatible with the provider
+                if (isProvGemini == isModelGemini || trimmedPrimary.contains("/") || !isModelGemini) {
+                    if (isProvAshna) {
+                        // Do not pass unrelated vendor model names (like Groq llama or Gemini) to Ashna AI
+                        if (!trimmedPrimary.contains("llama", true) && !trimmedPrimary.contains("gemini", true) && !trimmedPrimary.contains("groq", true)) {
+                            list.add(trimmedPrimary)
+                        }
+                    } else {
+                        list.add(trimmedPrimary)
+                    }
+                }
+            }
+            if (isProvAshna) {
+                // Ensure Ashna AI free native models are always tried first
+                list.add("ashna-x1")
+                list.add("ashna-x1-flash")
+                list.add("ashna-coder")
+            }
+            list.addAll(profile.defaultFallbackModels)
+            return list.distinct()
+        }
+
+        val primaryModel = if (mode == "coding" || mode == "build") {
+            state.buildModel.ifBlank { state.activeModel }
+        } else {
+            state.activeModel
+        }
+
+        if (hasCustomUserKey) {
+            val chosenProvider = state.providerName.ifBlank { "Gemini" }
+            for (key in userKeys) {
+                // Auto-detect the actual provider matching this key's signature
+                val detectedProfile = ProviderProfile.detectProviderFromKey(key, chosenProvider)
+                val targetProvider = detectedProfile.displayName
+                val models = resolveCandidateModels(targetProvider, primaryModel)
+                attemptsList.add(ProviderAttempt(targetProvider, key, models, isUserKey = true))
+
+                // If detectedProvider differs from chosenProvider, also add chosenProvider as alternative attempt
+                if (!targetProvider.equals(chosenProvider, ignoreCase = true) && !key.startsWith("AIza") && !key.startsWith("gsk_")) {
+                    val altModels = resolveCandidateModels(chosenProvider, primaryModel)
+                    attemptsList.add(ProviderAttempt(chosenProvider, key, altModels, isUserKey = true))
+                }
             }
 
+            // Strict BYOK Isolation: When a user has configured their own API key in Settings,
+            // they are completely disconnected from the Admin's fleet key and quota.
+            // All calls run 100% on their own key with UNLIMITED quota.
+            // Do NOT append adminDefaultKey, poolKeys, or platform fallback keys so the user's connection never touches the Admin key.
+        } else {
+            // Free Tier / Admin Default Key for users who haven't added their own key
+            val adminConfig = com.example.data.local.AdminConfigManager.globalConfig.value
+            val adminDefaultKey = sanitizeKey(adminConfig.defaultApiKey)
             if (adminDefaultKey.isNotBlank()) {
-                val adminProvider = adminConfig.defaultProvider.ifBlank { "Gemini" }
-                val adminModel = adminConfig.defaultModel.ifBlank { "" }
-                attemptsList.add(ProviderAttempt(adminProvider, adminDefaultKey, resolveModels(adminProvider, adminModel)))
+                val adminProv = adminConfig.defaultProvider.ifBlank { "Gemini" }
+                attemptsList.add(ProviderAttempt(adminProv, adminDefaultKey, resolveCandidateModels(adminProv, adminConfig.defaultModel), isUserKey = false))
             }
-        }
 
-        for (k in userKeys) {
-            val trimmed = sanitizeKey(k)
-            val detectedProvider = when {
-                trimmed.startsWith("AIza") || trimmed.startsWith("AQ.") -> "Gemini"
-                trimmed.startsWith("gsk_") -> "Groq"
-                trimmed.startsWith("sk-or-") -> "OpenRouter"
-                trimmed.startsWith("sk-ant-") -> "Anthropic"
-                trimmed.startsWith("opencode", ignoreCase = true) || trimmed.startsWith("oc-") -> "OpenCode.ai"
-                trimmed.startsWith("sk-proj-") || trimmed.startsWith("sk-admin-") -> "OpenAI"
-                trimmed.startsWith("xai-") -> "xAI"
-                trimmed.startsWith("mistral-") -> "Mistral"
-                trimmed.startsWith("together-") -> "Together"
-                trimmed.startsWith("pplx-") -> "Perplexity"
-                trimmed.startsWith("csk-") -> "Cerebras"
-                trimmed.startsWith("fw_") || trimmed.startsWith("fwi_") -> "Fireworks"
-                trimmed.startsWith("http://") || trimmed.startsWith("https://") -> "Custom"
-                state.providerName.contains("OpenCode", ignoreCase = true) -> "OpenCode.ai"
-                trimmed.startsWith("sk-") -> if (state.providerName in listOf("OpenRouter", "Groq", "OpenAI", "DeepSeek", "Anthropic", "OpenCode.ai", "Mistral", "xAI", "Together", "Perplexity", "Cerebras", "Fireworks", "SiliconFlow", "Sambanova")) state.providerName else "OpenAI"
-                trimmed.length >= 35 -> if (state.providerName.contains("OpenCode", ignoreCase = true)) "OpenCode.ai" else if (state.providerName.isNotBlank() && state.providerName != "Gemini") state.providerName else "Gemini"
-                else -> state.providerName
+            // Platform BuildConfig keys as last resort ONLY when user has no key
+            val geminiBuildConfigKey = try { com.example.BuildConfig.GEMINI_API_KEY.trim() } catch (e: Exception) { "" }
+            if (geminiBuildConfigKey.isNotBlank() && !geminiBuildConfigKey.contains("MY_")) {
+                attemptsList.add(ProviderAttempt("Gemini", geminiBuildConfigKey, ProviderProfile.GEMINI.defaultFallbackModels, isUserKey = false))
             }
-            attemptsList.add(ProviderAttempt(detectedProvider, trimmed, resolveModels(detectedProvider, state.activeModel)))
-            // If generic sk- key, add OpenRouter, DeepSeek, and OpenAI fallbacks
-            if (trimmed.startsWith("sk-") && !trimmed.startsWith("sk-or-") && !trimmed.startsWith("sk-ant-") && !state.providerName.contains("OpenCode", ignoreCase = true)) {
-                if (detectedProvider != "OpenRouter") {
-                    attemptsList.add(ProviderAttempt("OpenRouter", trimmed, resolveModels("OpenRouter")))
-                }
-                if (detectedProvider != "DeepSeek") {
-                    attemptsList.add(ProviderAttempt("DeepSeek", trimmed, resolveModels("DeepSeek")))
-                }
-                if (detectedProvider != "OpenAI") {
-                    attemptsList.add(ProviderAttempt("OpenAI", trimmed, resolveModels("OpenAI")))
-                }
-            }
-        }
 
-        // 2. Platform Gemini fallback (from BuildConfig) ONLY as a secondary safety net
-        if (geminiBuildConfigKey.isNotBlank() && !geminiBuildConfigKey.contains("MY_")) {
-            if (attemptsList.none { it.provider == "Gemini" && it.apiKey == geminiBuildConfigKey }) {
-                attemptsList.add(ProviderAttempt("Gemini", geminiBuildConfigKey, fallbackModelsGemini))
-            }
-        }
-
-        // 3. OpenRouter fallback
-        if (openRouterBuildConfigKey.isNotBlank() && !openRouterBuildConfigKey.contains("MY_")) {
-            val openRouterModels = if (isVisionRequest) visionModelsOpenRouter else fallbackModelsOpenRouter
-            if (attemptsList.none { it.provider == "OpenRouter" && it.apiKey == openRouterBuildConfigKey }) {
-                attemptsList.add(ProviderAttempt("OpenRouter", openRouterBuildConfigKey, openRouterModels))
+            val openRouterBuildConfigKey = try { com.example.BuildConfig.OPENROUTER_API_KEY.trim() } catch (e: Exception) { "" }
+            if (openRouterBuildConfigKey.isNotBlank() && !openRouterBuildConfigKey.contains("MY_")) {
+                attemptsList.add(ProviderAttempt("OpenRouter", openRouterBuildConfigKey, ProviderProfile.OPENROUTER.defaultFallbackModels, isUserKey = false))
             }
         }
 
         if (attemptsList.isEmpty()) {
-            val errorMsg = "⚠️ API Error: No valid API Key configured! Please open Settings (⚙️) -> 'AI Provider' and enter your Gemini, OpenRouter, Groq, or OpenAI API key to enable live AI code generation."
+            val errorMsg = "⚠️ API Key Missing: Please open Settings (⚙️) ➔ 'AI Provider' and add your API key (Gemini, Groq, OpenRouter, OpenAI, etc.)."
             Log.e(TAG, errorMsg)
-            return Result.failure(IllegalStateException(errorMsg))
+            return@withContext Result.failure(IllegalStateException(errorMsg))
         }
 
-        var lastError: Throwable? = null
+        val report = AttemptReport()
 
         for (attempt in attemptsList) {
+            var consecutiveQuotaFailures = 0
             for (modelName in attempt.models) {
-                Log.d(TAG, "Attempting API call -> Provider: ${attempt.provider}, Model: $modelName, Images: ${base64Images.size}")
-                val isBuildTask = mode == "coding" || mode == "build"
-                val isComplexTask = isBuildTask ||
-                    effectiveSystemPrompt.contains("Android", ignoreCase = true) ||
-                    prompt.contains("File", ignoreCase = true) ||
-                    prompt.contains("package", ignoreCase = true) ||
-                    prompt.contains("banao", ignoreCase = true) ||
-                    prompt.contains("app", ignoreCase = true) ||
-                    prompt.contains("code", ignoreCase = true)
-                val timeoutMs = if (isBuildTask) 300_000L else if (isComplexTask) 120_000L else 45_000L
-                val result = try {
-                    kotlinx.coroutines.withTimeout(timeoutMs) {
-                        streamRemote(
-                            provider = attempt.provider,
-                            apiKey = attempt.apiKey,
-                            modelName = modelName,
-                            prompt = prompt,
-                            mode = mode,
-                            history = history,
-                            customSystemPrompt = effectiveSystemPrompt,
-                            base64Images = base64Images,
-                            onChunk = onChunk
-                        )
-                    }
-                } catch (e: kotlinx.coroutines.TimeoutCancellationException) {
-                    Log.w(TAG, "Attempt timed out after ${timeoutMs}ms for ${attempt.provider} ($modelName): ${e.message}")
-                    Result.failure(e)
-                } catch (e: Exception) {
-                    if (e is kotlinx.coroutines.CancellationException && e !is kotlinx.coroutines.TimeoutCancellationException) throw e
-                    Result.failure(e)
-                }
+                val start = System.currentTimeMillis()
+                Log.d(TAG, "Executing attempt ➔ Provider: ${attempt.provider}, Model: $modelName, UserKey: ${attempt.isUserKey}")
 
-                if (result.isSuccess) {
-                    val fullText = result.getOrNull()
-                    if (!fullText.isNullOrBlank()) {
-                        val sanitized = sanitizeAiReply(fullText)
-                        Log.i(TAG, "API success with ${attempt.provider} ($modelName)!")
-                        if (!hasCustomUserKey) {
-                            com.example.data.local.AdminConfigManager.recordApiUsage(usageType)
-                        }
-                        return Result.success(sanitized)
-                    }
-                }
+                try {
+                    val result = LlmClient.stream(
+                        providerName = attempt.provider,
+                        apiKey = attempt.apiKey,
+                        modelName = modelName,
+                        request = request,
+                        onChunk = onChunk
+                    )
+                    val latency = System.currentTimeMillis() - start
 
-                val err = result.exceptionOrNull()
-                lastError = err
-                Log.w(TAG, "Attempt with ${attempt.provider} ($modelName) failed: ${err?.message}")
-                val errMsg = err?.message ?: ""
-                if (errMsg.contains("401") || errMsg.contains("403") || errMsg.contains("Invalid API Key") || errMsg.contains("quota", ignoreCase = true) || errMsg.contains("429") || errMsg.contains("resource_exhausted", ignoreCase = true) || errMsg.contains("exceeded", ignoreCase = true)) {
-                    Log.w(TAG, "Fast aborting remaining models for ${attempt.provider} due to key/quota error ($errMsg)")
-                    break
-                }
-                delay(150)
-            }
-        }
+                    if (result.isSuccess) {
+                        val reply = result.getOrNull().orEmpty()
+                        if (reply.isNotBlank()) {
+                            val sanitized = if (sanitize) sanitizeAiReply(reply) else reply
+                            report.addAttempt(AttemptRecord(attempt.provider, modelName, attempt.isUserKey, success = true, latencyMs = latency))
+                            Log.i(TAG, "API success with ${attempt.provider} ($modelName) in ${latency}ms")
 
-        val errDetail = lastError?.message?.ifBlank { null } ?: "All attempts failed without response"
-        val errorMsg = "⚠️ API Error: $errDetail. All configured AI models failed. Please check your API key, model, or network in Settings (⚙️)."
-        Log.e(TAG, errorMsg)
-        return Result.failure(IllegalStateException(errorMsg))
-    }
-
-    private suspend fun streamRemote(
-        provider: String,
-        apiKey: String,
-        modelName: String,
-        prompt: String,
-        mode: String = "chat",
-        history: List<Pair<String, String>>,
-        customSystemPrompt: String,
-        base64Images: List<String> = emptyList(),
-        onChunk: suspend (String) -> Unit
-    ): Result<String> = withContext(Dispatchers.IO) {
-        val trimmedKey = apiKey.trim()
-        val fullResponse = java.lang.StringBuilder()
-        val isBuildMode = mode == "coding" || mode == "build"
-        
-        if (provider.equals("Gemini", ignoreCase = true)) {
-            // Gemini uses its own specific format
-            return@withContext GeminiService.streamGenerateContentWithKey(
-                apiKey = trimmedKey,
-                modelName = modelName,
-                prompt = prompt,
-                mode = mode,
-                history = history,
-                temperature = if (isBuildMode) 1.0f else 0.7f,
-                customSystemPrompt = customSystemPrompt,
-                base64Images = base64Images,
-                onChunk = onChunk
-            )
-        }
-        
-        val isAnthropic = provider.contains("Anthropic", ignoreCase = true)
-        val baseUrl = when {
-            isAnthropic -> "https://api.anthropic.com/v1/messages"
-            provider.startsWith("http://") || provider.startsWith("https://") -> provider
-            trimmedKey.startsWith("http://") || trimmedKey.startsWith("https://") -> trimmedKey.substringBefore(" ")
-            provider.contains("InceptionLabs", ignoreCase = true) || provider.contains("inceptionlabs", ignoreCase = true) -> "https://api.inceptionlabs.ai/v1/chat/completions"
-            provider.contains("Atria", ignoreCase = true) || provider.contains("atria-asi", ignoreCase = true) -> "https://api.atria-asi.ai/v1/chat/completions"
-            provider.contains("OpenRouter", ignoreCase = true) -> "https://openrouter.ai/api/v1/chat/completions"
-            provider.contains("Groq", ignoreCase = true) -> "https://api.groq.com/openai/v1/chat/completions"
-            provider.contains("OpenAI", ignoreCase = true) -> "https://api.openai.com/v1/chat/completions"
-            provider.contains("DeepSeek", ignoreCase = true) -> "https://api.deepseek.com/chat/completions"
-            provider.contains("OpenCode", ignoreCase = true) -> "https://opencode.ai/inference/openai/v1/chat/completions"
-            provider.contains("Mistral", ignoreCase = true) -> "https://api.mistral.ai/v1/chat/completions"
-            provider.contains("Together", ignoreCase = true) -> "https://api.together.xyz/v1/chat/completions"
-            provider.contains("xAI", ignoreCase = true) -> "https://api.x.ai/v1/chat/completions"
-            provider.contains("Perplexity", ignoreCase = true) -> "https://api.perplexity.ai/chat/completions"
-            provider.contains("Cerebras", ignoreCase = true) -> "https://api.cerebras.ai/v1/chat/completions"
-            provider.contains("Fireworks", ignoreCase = true) -> "https://api.fireworks.ai/inference/v1/chat/completions"
-            provider.contains("Sambanova", ignoreCase = true) -> "https://api.sambanova.ai/v1/chat/completions"
-            provider.contains("SiliconFlow", ignoreCase = true) -> "https://api.siliconflow.cn/v1/chat/completions"
-            else -> "https://api.openai.com/v1/chat/completions"
-        }
-        
-        val effectivePrompt = if (prompt.isNotBlank()) {
-            prompt.trim()
-        } else if (base64Images.isNotEmpty()) {
-            "Please analyze this image and provide a detailed explanation or answer the questions shown in it."
-        } else {
-            "Hello"
-        }
-
-        val jsonBody = JSONObject().apply {
-            put("model", modelName)
-            put("stream", true)
-            put("temperature", if (isBuildMode) 1.0 else 0.7)
-            put("max_tokens", if (isBuildMode) 65536 else 8192)
-            if (isAnthropic) {
-                if (customSystemPrompt.isNotEmpty()) {
-                    put("system", customSystemPrompt)
-                }
-            }
-            
-            val messagesArray = JSONArray()
-            if (!isAnthropic && customSystemPrompt.isNotEmpty()) {
-                val sysObj = JSONObject()
-                sysObj.put("role", "system")
-                sysObj.put("content", customSystemPrompt)
-                messagesArray.put(sysObj)
-            }
-            
-            for (msg in history) {
-                val histObj = JSONObject()
-                histObj.put("role", if (msg.first == "user") "user" else "assistant")
-                histObj.put("content", msg.second)
-                messagesArray.put(histObj)
-            }
-
-            val userObj = JSONObject()
-            userObj.put("role", "user")
-            if (base64Images.isEmpty()) {
-                userObj.put("content", effectivePrompt)
-            } else {
-                val contentParts = JSONArray()
-                contentParts.put(JSONObject().apply {
-                    put("type", "text")
-                    put("text", effectivePrompt)
-                })
-                for (b64 in base64Images) {
-                    val cleanB64 = b64.substringAfter("base64,").trim().replace("\n", "").replace("\r", "")
-                    if (cleanB64.isNotBlank()) {
-                        contentParts.put(JSONObject().apply {
-                            put("type", "image_url")
-                            put("image_url", JSONObject().apply {
-                                put("url", "data:image/jpeg;base64,$cleanB64")
-                            })
-                        })
-                    }
-                }
-                userObj.put("content", contentParts)
-            }
-            messagesArray.put(userObj)
-            
-            put("messages", messagesArray)
-        }
-        
-        val requestBody = jsonBody.toString().toRequestBody("application/json".toMediaType())
-        val requestBuilder = Request.Builder()
-            .url(baseUrl)
-            .post(requestBody)
-            .addHeader("User-Agent", "Mozilla/5.0 (Linux; Android 14; Mobile) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36")
-            
-        if (isAnthropic) {
-            requestBuilder.addHeader("x-api-key", trimmedKey)
-            requestBuilder.addHeader("anthropic-version", "2023-06-01")
-        } else {
-            requestBuilder.addHeader("Authorization", "Bearer $trimmedKey")
-        }
-            
-        if (provider.contains("OpenRouter", ignoreCase = true)) {
-            requestBuilder.addHeader("HTTP-Referer", "https://github.com/google/ai-studio")
-            requestBuilder.addHeader("X-Title", "AI Studio App")
-        }
-        if (provider.contains("OpenCode", ignoreCase = true)) {
-            requestBuilder.addHeader("X-Api-Key", trimmedKey)
-        }
-        
-        val request = requestBuilder.build()
-        
-        try {
-            var response = client.newCall(request).execute()
-            if (!response.isSuccessful && provider.contains("OpenCode", ignoreCase = true) && (response.code == 404 || response.code == 502 || response.code == 400)) {
-                val zenRequest = requestBuilder.url("https://opencode.ai/zen/v1/chat/completions").build()
-                val zenResponse = client.newCall(zenRequest).execute()
-                if (zenResponse.isSuccessful || zenResponse.code == 401) {
-                    response = zenResponse
-                }
-            }
-            if (!response.isSuccessful && response.code == 400 && customSystemPrompt.isNotBlank()) {
-                val errBody = response.body?.string() ?: ""
-                if (errBody.contains("system", ignoreCase = true) || errBody.contains("developer", ignoreCase = true) || errBody.contains("role", ignoreCase = true)) {
-                    val fallbackJson = JSONObject().apply {
-                        put("model", modelName)
-                        put("stream", true)
-                        put("temperature", 0.7)
-                        val fallbackMessages = JSONArray()
-                        for (msg in history) {
-                            val histObj = JSONObject()
-                            histObj.put("role", if (msg.first == "user") "user" else "assistant")
-                            histObj.put("content", msg.second)
-                            fallbackMessages.put(histObj)
-                        }
-                        val userObj = JSONObject()
-                        userObj.put("role", "user")
-                        userObj.put("content", "System Directives:\n$customSystemPrompt\n\nUser Request:\n$effectivePrompt")
-                        fallbackMessages.put(userObj)
-                        put("messages", fallbackMessages)
-                    }
-                    val retryRequest = requestBuilder.post(fallbackJson.toString().toRequestBody("application/json".toMediaType())).build()
-                    val retryResponse = client.newCall(retryRequest).execute()
-                    if (retryResponse.isSuccessful) {
-                        response = retryResponse
-                    }
-                }
-            }
-            if (!response.isSuccessful) {
-                val errBody = response.body?.string() ?: ""
-                if (response.code == 401) {
-                    throw Exception("Invalid API Key for $provider. Please verify your key from opencode.ai console.")
-                }
-                if (errBody.contains("FreeTierError", ignoreCase = true) || errBody.contains("free tier can only be used from within OpenCode", ignoreCase = true)) {
-                    throw Exception("OpenCode model '$modelName' free-tier restriction. Please choose another model like 'glm-5.1' or 'deepseek-v4-flash' or use an active key.")
-                }
-                throw Exception("HTTP ${response.code}: $errBody")
-            }
-            
-            val bodyStream = response.body?.byteStream()
-            if (bodyStream != null) {
-                val reader = BufferedReader(InputStreamReader(bodyStream))
-                var line: String?
-                var isFirstLine = true
-                val nonSseBuffer = StringBuilder()
-
-                while (reader.readLine().also { line = it } != null) {
-                    kotlinx.coroutines.currentCoroutineContext().ensureActive()
-                    val curLine = line?.trim() ?: continue
-
-                    // Check if response is non-SSE JSON
-                    if (isFirstLine && !curLine.startsWith("data:") && curLine.startsWith("{")) {
-                        nonSseBuffer.append(curLine)
-                        while (reader.readLine().also { line = it } != null) {
-                            nonSseBuffer.append(line)
-                        }
-                        try {
-                            val jsonObj = JSONObject(nonSseBuffer.toString())
-                            val choices = jsonObj.optJSONArray("choices")
-                            if (choices != null && choices.length() > 0) {
-                                val choice = choices.getJSONObject(0)
-                                val msg = choice.optJSONObject("message")
-                                val content = msg?.optString("content", "") ?: choice.optString("text", "")
-                                if (content.isNotEmpty()) {
-                                    fullResponse.append(content)
-                                    onChunk(content)
-                                }
-                            } else {
-                                val contentArr = jsonObj.optJSONArray("content")
-                                if (contentArr != null && contentArr.length() > 0) {
-                                    val block = contentArr.getJSONObject(0)
-                                    val text = block.optString("text", "")
-                                    if (text.isNotEmpty()) {
-                                        fullResponse.append(text)
-                                        onChunk(text)
-                                    }
-                                }
+                            if (!hasCustomUserKey) {
+                                com.example.data.local.AdminConfigManager.recordApiUsage(usageType)
                             }
-                        } catch (e: Exception) {
-                            Log.w(TAG, "Error parsing non-SSE JSON response: ${e.message}")
+                            return@withContext Result.success(sanitized)
                         }
+                    }
+
+                    val exception = result.exceptionOrNull()
+                    val llmError = exception as? LlmError
+                        ?: LlmError(attempt.provider, modelName, null, exception?.message ?: "Unknown failure", LlmErrorCategory.UNKNOWN)
+
+                    report.addAttempt(AttemptRecord(attempt.provider, modelName, attempt.isUserKey, success = false, error = llmError, latencyMs = latency))
+                    Log.w(TAG, "Attempt with ${attempt.provider} ($modelName) failed: ${llmError.rawMessage}")
+
+                    // Stop cycling further models on this provider if auth or quota is definitively rejected
+                    if (llmError.category == LlmErrorCategory.AUTH) {
+                        Log.w(TAG, "Authentication failed for ${attempt.provider}. Skipping remaining models for this key.")
                         break
                     }
-                    isFirstLine = false
 
-                    if (curLine.startsWith("data:") && curLine != "data: [DONE]" && curLine != "data:[DONE]") {
-                        try {
-                            val dataJson = curLine.removePrefix("data:").trim()
-                            if (dataJson.isEmpty()) continue
-                            val jsonObj = JSONObject(dataJson)
-                            val choices = jsonObj.optJSONArray("choices")
-                            if (choices != null && choices.length() > 0) {
-                                val delta = choices.getJSONObject(0).optJSONObject("delta")
-                                val content = delta?.optString("content", "") ?: delta?.optString("text", "") ?: ""
-                                if (content.isNotEmpty()) {
-                                    fullResponse.append(content)
-                                    onChunk(content)
-                                }
-                            } else if (jsonObj.optString("type") == "content_block_delta") {
-                                val delta = jsonObj.optJSONObject("delta")
-                                val text = delta?.optString("text", "") ?: ""
-                                if (text.isNotEmpty()) {
-                                    fullResponse.append(text)
-                                    onChunk(text)
-                                }
-                            }
-                        } catch (e: Exception) {
-                            Log.w(TAG, "Error parsing SSE JSON: ${e.message}")
+                    // If account has quota/credit exhausted (429) across models, check if free fallback models remain
+                    if (llmError.category == LlmErrorCategory.RATE_LIMIT &&
+                        (llmError.rawMessage.contains("quota", true) || llmError.rawMessage.contains("credit", true) || llmError.rawMessage.contains("balance", true) || llmError.rawMessage.contains("exceeded", true))) {
+                        consecutiveQuotaFailures++
+                        val remainingModels = attempt.models.dropWhile { it != modelName }.drop(1)
+                        val hasRemainingFreeModel = remainingModels.any { m ->
+                            m.contains("x1", ignoreCase = true) || m.contains("flash", ignoreCase = true) || m.contains("free", ignoreCase = true) || m.contains("mini", ignoreCase = true)
+                        }
+                        if (consecutiveQuotaFailures >= 2 && !hasRemainingFreeModel) {
+                            Log.w(TAG, "Quota exhausted for ${attempt.provider}. Skipping remaining models for this key to prevent app freeze.")
+                            break
                         }
                     }
+
+                } catch (e: RequestTooLargeException) {
+                    throw e // Propagate RequestTooLargeException so AutonomousAppBuilder can split phases
+                } catch (e: Exception) {
+                    val latency = System.currentTimeMillis() - start
+                    val llmError = LlmError(attempt.provider, modelName, null, e.message ?: "Execution error", LlmErrorCategory.UNKNOWN)
+                    report.addAttempt(AttemptRecord(attempt.provider, modelName, attempt.isUserKey, success = false, error = llmError, latencyMs = latency))
                 }
             }
-            val sanitized = sanitizeAiReply(fullResponse.toString())
-            Result.success(sanitized)
-        } catch (e: Exception) {
-            Result.failure(e)
         }
+
+        // Surface the honest primary failure from the user's provider, prioritizing the user's selected model
+        val primaryError = report.primaryFailure(primaryModel)
+        val userMessage = primaryError?.formatHumanMessage()
+            ?: "⚠️ API Error: All configured attempts failed.\n${report.toDiagnosticSummary()}"
+
+        Log.e(TAG, "All attempts failed. Returning honest report: $userMessage")
+        return@withContext Result.failure(IllegalStateException(userMessage))
     }
 
-    fun sanitizeAiReply(raw: String): String {
-        var cleaned = raw.replace(Regex("""<think>[\s\S]*?</think>""", RegexOption.IGNORE_CASE), "")
-            .replace(Regex("""\[THOUGHT\][\s\S]*?\[/THOUGHT\]""", RegexOption.IGNORE_CASE), "")
-            .trim()
+    fun sanitizeAiReply(raw: String, isStreaming: Boolean = false): String {
+        var text = raw.trim()
 
-        // Filter out model self-dialogue or leaked directives (e.g. User says "...", According to directive...)
-        if (cleaned.startsWith("User says", ignoreCase = true) || cleaned.startsWith("According to directive", ignoreCase = true)) {
-            val lines = cleaned.lines()
-            val finalLines = mutableListOf<String>()
-            var foundActualReply = false
-            for (l in lines) {
-                val trimmed = l.trim()
-                if (!foundActualReply) {
-                    if (trimmed.startsWith("User says", ignoreCase = true) ||
-                        trimmed.startsWith("According to directive", ignoreCase = true) ||
-                        trimmed.startsWith("Should I ", ignoreCase = true) ||
-                        trimmed.startsWith("Probably:", ignoreCase = true) ||
-                        trimmed.startsWith("Provide professional tone", ignoreCase = true) ||
-                        trimmed.startsWith("That's 1-2 sentences", ignoreCase = true) ||
-                        trimmed.startsWith("Good.", ignoreCase = true) ||
-                        trimmed.startsWith("Directive:", ignoreCase = true) ||
-                        trimmed.startsWith("Also mention", ignoreCase = true)
-                    ) {
-                        continue
-                    } else if (trimmed.isNotBlank()) {
-                        foundActualReply = true
-                        finalLines.add(l)
+        // 1. Strip all closed reasoning XML tags (case-insensitive)
+        text = text.replace(Regex("(?i)<(?:think|thought|thought_process|reasoning|reflection|details)>[\\s\\S]*?</(?:think|thought|thought_process|reasoning|reflection|details)>"), "").trim()
+        text = text.replace(Regex("(?i)\\[THOUGHT\\][\\s\\S]*?\\[/THOUGHT\\]"), "").trim()
+
+        // 2. Strip anything preceding an orphaned closing tag (e.g. ... </think> Real Response)
+        val closeTags = listOf("</think>", "</thought>", "</reasoning>", "</thought_process>", "</reflection>", "[/THOUGHT]")
+        for (ctag in closeTags) {
+            val lastIdx = text.lastIndexOf(ctag, ignoreCase = true)
+            if (lastIdx != -1) {
+                text = text.substring(lastIdx + ctag.length).trim()
+            }
+        }
+
+        // 3. Handle active unclosed reasoning tag
+        val unclosedTags = listOf("<think>", "<thought>", "<reasoning>", "<thought_process>", "<reflection>", "[THOUGHT]")
+        for (tag in unclosedTags) {
+            val idx = text.indexOf(tag, ignoreCase = true)
+            if (idx != -1) {
+                if (isStreaming) {
+                    val preContent = text.substring(0, idx).trim()
+                    text = if (preContent.isNotBlank()) preContent else "Thinking..."
+                } else {
+                    val afterTag = text.substring(idx + tag.length).trim()
+                    val paragraphs = afterTag.split(Regex("\\n\\s*\\n+"))
+                    val candidate = paragraphs.dropWhile { p ->
+                        val tp = p.trim()
+                        tp.startsWith("1.") || tp.startsWith("2.") || tp.startsWith("*") ||
+                        tp.contains("user is asking", ignoreCase = true) ||
+                        tp.contains("I will reply", ignoreCase = true) ||
+                        tp.contains("directive", ignoreCase = true)
+                    }.joinToString("\n\n").trim()
+                    text = if (candidate.isNotBlank()) candidate else afterTag
+                }
+            }
+        }
+
+        // 4. Strip explicit thought/reasoning sections when followed by a clear response marker
+        val responseMarkerRegex = Regex("(?i)(?:^|\\n+)[#*\\s>_]*(?:Final Answer|Final Response|Response|Answer|Output|Conversational Reply)[#*\\s>_:]*\\s*\\n*")
+        val markerMatch = responseMarkerRegex.find(text)
+        if (markerMatch != null) {
+            val candidate = text.substring(markerMatch.range.last + 1).trim()
+            if (candidate.isNotBlank()) {
+                text = candidate
+            }
+        }
+
+        // 5. Strip leading thinking/reasoning headers (e.g. "**Thinking Process:**\n...") and subsequent deliberation bullets
+        val thinkingHeaderRegex = Regex("(?i)^[#*\\s>_]*(?:Thinking Process|Thought Process|Chain of Thought|Internal Thoughts|Internal Reasoning|Thinking|Thoughts|Reasoning|My Thought Process|Analysis|Scratchpad|Plan)[#*\\s>_:]*\\s*\\n+")
+        if (thinkingHeaderRegex.containsMatchIn(text)) {
+            val afterHeader = text.replaceFirst(thinkingHeaderRegex, "").trim()
+            val paragraphs = afterHeader.split(Regex("\\n\\s*\\n+"))
+            val candidate = paragraphs.dropWhile { p ->
+                val tp = p.trim()
+                tp.startsWith("1.") || tp.startsWith("2.") || tp.startsWith("3.") ||
+                tp.startsWith("*") || tp.startsWith("-") ||
+                tp.contains("user is asking", ignoreCase = true) ||
+                tp.contains("user said", ignoreCase = true) ||
+                tp.contains("I will reply", ignoreCase = true) ||
+                tp.contains("I should", ignoreCase = true) ||
+                tp.contains("Let me", ignoreCase = true) ||
+                tp.contains("directive", ignoreCase = true)
+            }.joinToString("\n\n").trim()
+            if (candidate.isNotBlank()) {
+                text = candidate
+            } else if (paragraphs.size > 1) {
+                text = paragraphs.last().trim()
+            }
+        }
+
+        // 6. Strip leading prompt leakage lines: "System Instruction:", "User Request:", "User Prompt:", "Core Guidelines:"
+        val promptLeakRegex = Regex("(?i)^[#*\\s>_]*(?:System Instruction|System Prompt|User Request|User Prompt|\\[Instruction:.*?\\]|Core Guidelines|CORE GUIDELINES|User Custom Directives)[#*\\s>_:]*[\\s\\S]*?(?:\\n\\s*\\n+|(?=\\n*[\\p{L}]))")
+        val leakMatch = promptLeakRegex.find(text)
+        if (leakMatch != null && leakMatch.range.first == 0) {
+            val candidate = text.substring(leakMatch.range.last + 1).trim()
+            if (candidate.isNotBlank()) {
+                text = candidate
+            }
+        }
+
+        // 7. Strip lines discussing following directives / guidelines / instructions
+        val directivesDelibRegex = Regex("(?i)^[#*\\s>_]*(?:We need to follow(?: the)? (?:directives|guidelines|instructions)|Let's follow(?: the)? (?:directives|guidelines|instructions)|According to(?: the)? (?:directives|guidelines|instructions)|The user wants(?: to)?|I must follow(?: the)? (?:directives|guidelines))[\\s\\S]*?(?:\\n\\s*\\n+|(?=\\n*[\\p{L}]))")
+        val delibMatch = directivesDelibRegex.find(text)
+        if (delibMatch != null && delibMatch.range.first == 0) {
+            val candidate = text.substring(delibMatch.range.last + 1).trim()
+            if (candidate.isNotBlank()) {
+                text = candidate
+            }
+        }
+
+        // 8. Strip lines echoing "Core Guidelines" or system identity instructions
+        val lines = text.lines()
+        if (lines.isNotEmpty() && (lines.first().contains("directives", ignoreCase = true) || lines.first().contains("guidelines", ignoreCase = true) || lines.first().contains("CORE GUIDELINES", ignoreCase = true))) {
+            val nonDelib = lines.dropWhile { it.contains("directive", ignoreCase = true) || it.contains("guideline", ignoreCase = true) || it.isBlank() }
+            if (nonDelib.isNotEmpty()) {
+                text = nonDelib.joinToString("\n").trim()
+            }
+        }
+
+        return text
+            .removePrefix("```markdown")
+            .removePrefix("```")
+            .removeSuffix("```")
+            .trim()
+    }
+
+    /**
+     * Discovers live models from provider endpoint and identifies free tier models.
+     * Throws an exception on invalid API keys / auth rejection to prevent fake model fallbacks.
+     */
+    suspend fun fetchModels(provider: String, apiKey: String): List<Pair<String, Boolean>> = withContext(Dispatchers.IO) {
+        val cleanKey = sanitizeKey(apiKey)
+        if (cleanKey.isBlank()) return@withContext emptyList()
+
+        // Auto-detect matching provider profile for this key if mismatched with UI selection
+        val detected = ProviderProfile.detectProviderFromKey(cleanKey, provider)
+        val profile = if (detected.id != ProviderProfile.GEMINI.id || cleanKey.startsWith("AIza") || cleanKey.startsWith("AQ.")) {
+            detected
+        } else {
+            ProviderProfile.getById(provider)
+        }
+        val targetProvider = profile.displayName
+
+        // 1. Google Gemini models endpoint
+        if (profile.id.equals("Gemini", ignoreCase = true)) {
+            val url = "${profile.baseUrl}/models?key=$cleanKey"
+            val request = Request.Builder().url(url).get().build()
+            val response = httpClient.newCall(request).execute()
+            val body = response.body?.string().orEmpty()
+            if (!response.isSuccessful) {
+                val errMsg = try {
+                    val json = JSONObject(body)
+                    json.optJSONObject("error")?.optString("message") ?: json.optString("message")
+                } catch (e: Exception) { "" }
+                val detail = if (errMsg.isNotBlank()) errMsg else "HTTP ${response.code} (${response.message})"
+                throw IllegalStateException("Invalid Gemini API Key: $detail")
+            }
+            val json = JSONObject(body)
+            val modelsArray = json.optJSONArray("models") ?: JSONArray()
+            val resultList = mutableListOf<Pair<String, Boolean>>()
+            for (i in 0 until modelsArray.length()) {
+                val m = modelsArray.getJSONObject(i)
+                val name = m.optString("name", "").replace("models/", "")
+                if (name.isBlank() || name.contains("embedding") || name.contains("imagen") || name.contains("aqa") || name.contains("bison") || name.contains("whisper")) continue
+                val methods = m.optJSONArray("supportedGenerationMethods")
+                if (methods != null) {
+                    var canGen = false
+                    for (j in 0 until methods.length()) {
+                        if (methods.optString(j) == "generateContent") { canGen = true; break }
+                    }
+                    if (!canGen) continue
+                }
+                val isFree = name.contains("flash") || name.contains("lite") || !name.contains("pro")
+                resultList.add(Pair(name, isFree))
+            }
+
+            // Always ensure primary stable Gemini models are present
+            profile.defaultFallbackModels.forEach { m ->
+                val isFree = m.contains("flash") || m.contains("lite")
+                if (resultList.none { it.first.equals(m, ignoreCase = true) }) {
+                    resultList.add(Pair(m, isFree))
+                }
+            }
+
+            if (resultList.isNotEmpty()) {
+                // Priority ranking: gemini-2.0-flash, gemini-1.5-flash, gemini-2.0-flash-lite, gemini-1.5-pro, then others
+                return@withContext resultList.distinctBy { it.first }.sortedWith(
+                    compareByDescending<Pair<String, Boolean>> {
+                        when (it.first) {
+                            "gemini-2.0-flash" -> 100
+                            "gemini-1.5-flash" -> 90
+                            "gemini-2.0-flash-lite" -> 80
+                            "gemini-1.5-pro" -> 70
+                            else -> if (it.second) 50 else 10
+                        }
+                    }.thenBy { it.first }
+                )
+            }
+            return@withContext profile.defaultFallbackModels.map { Pair(it, true) }
+        }
+
+        // 2. OpenAI-compatible /models endpoint
+        val modelsUrl = "${profile.baseUrl.trimEnd('/')}${profile.modelsPath}"
+        val requestBuilder = Request.Builder().url(modelsUrl).get()
+        when (profile.authStyle) {
+            com.example.llm.AuthStyle.BEARER_TOKEN -> requestBuilder.addHeader("Authorization", "Bearer $cleanKey")
+            com.example.llm.AuthStyle.X_API_KEY_HEADER -> requestBuilder.addHeader("x-api-key", cleanKey)
+            com.example.llm.AuthStyle.ANTHROPIC_HEADER -> {
+                requestBuilder.addHeader("x-api-key", cleanKey)
+                requestBuilder.addHeader("anthropic-version", "2023-06-01")
+            }
+            else -> requestBuilder.addHeader("Authorization", "Bearer $cleanKey")
+        }
+        if (profile.id.contains("Ashna", ignoreCase = true) || profile.id.contains("Asana", ignoreCase = true)) {
+            requestBuilder.addHeader("X-Api-Key", cleanKey)
+            requestBuilder.addHeader("Api-Key", cleanKey)
+        }
+        if (profile.id.contains("atria", ignoreCase = true)) {
+            requestBuilder.addHeader("X-Api-Key", cleanKey)
+        }
+        if (profile.id.contains("OpenCode", ignoreCase = true)) {
+            requestBuilder.addHeader("X-Api-Key", cleanKey)
+            requestBuilder.addHeader("User-Agent", "Mozilla/5.0 (Linux; Android 14; Mobile) AppleWebKit/537.36")
+        }
+
+        var response = httpClient.newCall(requestBuilder.build()).execute()
+        var body = response.body?.string().orEmpty()
+
+        // Fallback endpoint check for Ashna AI if first returns 404
+        if (response.code == 404 && profile.id.contains("Ashna", ignoreCase = true)) {
+            try {
+                val altReq = Request.Builder()
+                    .url("https://api.ashna.ai/v1/models")
+                    .addHeader("Authorization", "Bearer $cleanKey")
+                    .addHeader("X-Api-Key", cleanKey)
+                    .addHeader("Api-Key", cleanKey)
+                    .get()
+                    .build()
+                val altResp = httpClient.newCall(altReq).execute()
+                val altBody = altResp.body?.string().orEmpty()
+                if (altResp.isSuccessful || altResp.code in listOf(401, 403)) {
+                    response = altResp
+                    body = altBody
+                }
+            } catch (ignored: Exception) {}
+        }
+
+        // Strict rejection on authentication failures (e.g. 401, 403, or invalid API key payload)
+        if (response.code in listOf(401, 403) || (!response.isSuccessful && (body.contains("invalid_api_key", true) || body.contains("unauthorized", true) || body.contains("invalid api key", true)))) {
+            val errMsg = try {
+                val json = JSONObject(body)
+                json.optJSONObject("error")?.optString("message") 
+                    ?: json.optString("message") 
+                    ?: json.optString("detail")
+            } catch (e: Exception) { "" }
+            val detail = if (errMsg.isNotBlank()) errMsg else "HTTP ${response.code} Unauthorized"
+            throw IllegalStateException("Invalid API Key for $targetProvider: $detail")
+        }
+
+        if (response.isSuccessful) {
+            // Live probe ONLY for providers that host public unauthenticated /models (like inceptionlabs.ai)
+            if (profile.id.contains("inception", ignoreCase = true)) {
+                val testProbe = com.example.llm.LlmClient.testConnection(profile.id, cleanKey, "mercury-2.5")
+                if (!testProbe.success && testProbe.error?.category == LlmErrorCategory.AUTH) {
+                    val errDetail = testProbe.error.formatHumanMessage()
+                    throw IllegalStateException("Invalid API Key for $targetProvider: $errDetail")
+                }
+            }
+
+            val list = mutableListOf<Pair<String, Boolean>>()
+            try {
+                val trimmedBody = body.trim()
+                if (trimmedBody.startsWith("[")) {
+                    val array = JSONArray(trimmedBody)
+                    for (i in 0 until array.length()) {
+                        val item = array.opt(i)
+                        val id = if (item is JSONObject) item.optString("id", item.optString("name", "")) else item.toString()
+                        if (id.isNotBlank() && !id.contains("whisper") && !id.contains("embed")) {
+                            val isFree = id.contains(":free", true) || id.contains("flash", true) || id.contains("free", true) || id.contains("mini", true) || id.contains("ashna-x1", true) || (targetProvider.contains("Ashna", true) && !id.contains("astra", true) && !id.contains("gpt-6", true) && !id.contains("claude", true))
+                            list.add(Pair(id, isFree))
+                        }
                     }
                 } else {
-                    finalLines.add(l)
+                    val json = JSONObject(trimmedBody)
+                    val data = json.optJSONArray("data") ?: json.optJSONArray("models") ?: JSONArray()
+                    for (i in 0 until data.length()) {
+                        val item = data.opt(i)
+                        val id = if (item is JSONObject) item.optString("id", item.optString("name", "")) else item.toString()
+                        if (id.isBlank() || id.contains("whisper") || id.contains("tts") || id.contains("embed")) continue
+                        val isFree = id.contains(":free", true) || id.contains("flash", true) || id.contains("free", true) || id.contains("mini", true) || id.contains("ashna-x1", true) || (targetProvider.contains("Ashna", true) && !id.contains("astra", true) && !id.contains("gpt-6", true) && !id.contains("claude", true))
+                        list.add(Pair(id, isFree))
+                    }
                 }
+            } catch (e: Exception) {
+                Log.w(TAG, "Error parsing models json for $targetProvider: ${e.message}")
             }
-            if (finalLines.isNotEmpty()) {
-                cleaned = finalLines.joinToString("\n").trim()
+
+            // Always merge known profile models for full catalog visibility
+            profile.defaultFallbackModels.forEach { m ->
+                val isFree = m.contains("free", true) || m.contains("flash", true) || m.contains("mini", true)
+                list.add(Pair(m, isFree))
+            }
+
+            if (list.isNotEmpty()) {
+                return@withContext list.distinctBy { it.first }.sortedWith(
+                    compareByDescending<Pair<String, Boolean>> { it.second }.thenBy {
+                        if (it.first.equals("ashna-x1", true)) 0
+                        else if (it.first.contains("ashna-x1-flash", true)) 1
+                        else 2
+                    }.thenBy { it.first }
+                )
             }
         }
-        return cleaned
-    }
-    
-    suspend fun fetchModels(provider: String, apiKey: String): List<Pair<String, Boolean>> = withContext(Dispatchers.IO) {
-        val trimmedKey = sanitizeKey(apiKey)
-        if (trimmedKey.isBlank()) return@withContext emptyList()
-        
-        val effectiveProvider = when {
-            trimmedKey.startsWith("AIza") || trimmedKey.startsWith("AQ.") -> "Gemini"
-            trimmedKey.startsWith("gsk_") -> "Groq"
-            trimmedKey.startsWith("sk-or-") -> "OpenRouter"
-            trimmedKey.startsWith("sk-ant-") -> "Anthropic"
-            trimmedKey.startsWith("opencode", ignoreCase = true) || trimmedKey.startsWith("oc-") -> "OpenCode.ai"
-            trimmedKey.startsWith("sk-proj-") || trimmedKey.startsWith("sk-admin-") -> "OpenAI"
-            trimmedKey.startsWith("xai-") -> "xAI"
-            trimmedKey.startsWith("mistral-") -> "Mistral"
-            trimmedKey.startsWith("together-") -> "Together"
-            trimmedKey.startsWith("pplx-") -> "Perplexity"
-            trimmedKey.startsWith("csk-") -> "Cerebras"
-            trimmedKey.startsWith("fw_") || trimmedKey.startsWith("fwi_") -> "Fireworks"
-            else -> provider
-        }
-        
-        try {
-            if (effectiveProvider.equals("Gemini", ignoreCase = true)) {
-                val url = "https://generativelanguage.googleapis.com/v1beta/models?key=$trimmedKey"
-                val request = Request.Builder().url(url).get().build()
-                val response = try { client.newCall(request).execute() } catch (e: Exception) { null }
-                if (response != null && (response.code == 400 || response.code == 401 || response.code == 403)) {
-                    val bodyStr = response.body?.string() ?: ""
-                    val errDetail = try {
-                        JSONObject(bodyStr).optJSONObject("error")?.optString("message") ?: "Invalid API Key"
-                    } catch (e: Exception) { "Invalid API Key (${response.code})" }
-                    throw IllegalStateException("Gemini API Error: $errDetail. Please check your key from Google AI Studio.")
-                }
-                if (response != null && response.isSuccessful) {
-                    val json = JSONObject(response.body?.string() ?: "{}")
-                    val modelsArray = json.optJSONArray("models") ?: JSONArray()
-                    val resultList = mutableListOf<Pair<String, Boolean>>()
-                    for (i in 0 until modelsArray.length()) {
-                        val modelObj = modelsArray.getJSONObject(i)
-                        val name = modelObj.optString("name", "").replace("models/", "")
-                        if (name.isBlank()) continue
-                        if (name.contains("embedding") || name.contains("imagen") || name.contains("aqa") || name.contains("learnlm")) continue
-                        val methods = modelObj.optJSONArray("supportedGenerationMethods")
-                        if (methods != null) {
-                            var canGen = false
-                            for (m in 0 until methods.length()) {
-                                if (methods.optString(m) == "generateContent") { canGen = true; break }
-                            }
-                            if (!canGen) continue
-                        }
-                        val isFree = name.contains("flash") || name.contains("lite") || name.contains("latest") || !name.contains("pro")
-                        resultList.add(Pair(name, isFree))
-                    }
-                    if (resultList.isNotEmpty()) {
-                        return@withContext resultList.sortedWith(
-                            compareByDescending<Pair<String, Boolean>> { it.second }.thenBy { it.first }
-                        )
-                    }
-                }
-                // Fallback verified active Gemini models with free tier status
-                return@withContext GeminiModels.CHAT_FALLBACKS.map {
-                    Pair(it, it.contains("flash") || it.contains("lite") || it.contains("latest"))
-                }
-            }
-            
-            if (effectiveProvider.contains("OpenCode", ignoreCase = true)) {
-                val opencodeEndpoints = listOf(
-                    "https://opencode.ai/inference/v1/models",
-                    "https://opencode.ai/zen/v1/models"
-                )
-                var lastErr: String? = null
-                for (url in opencodeEndpoints) {
-                    try {
-                        val request = Request.Builder()
-                            .url(url)
-                            .get()
-                            .addHeader("Authorization", "Bearer $trimmedKey")
-                            .addHeader("X-Api-Key", trimmedKey)
-                            .addHeader("User-Agent", "Mozilla/5.0 (Linux; Android 14; Mobile) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36")
-                            .build()
 
-                        val response = client.newCall(request).execute()
-                        val code = response.code
-                        val respBody = response.body?.string() ?: ""
-
-                        if (code == 401 || code == 403) {
-                            throw IllegalStateException("Invalid OpenCode.ai API Key ($code). Please check your key from opencode.ai console.")
-                        }
-
-                        if (response.isSuccessful && respBody.isNotBlank()) {
-                            val json = JSONObject(respBody)
-                            val dataArray = json.optJSONArray("data") ?: JSONArray()
-                            val resultList = mutableListOf<Pair<String, Boolean>>()
-                            for (i in 0 until dataArray.length()) {
-                                val modelObj = dataArray.getJSONObject(i)
-                                val id = modelObj.optString("id", "")
-                                if (id.isNotBlank()) {
-                                    val isFree = id.contains("-free") || id == "big-pickle"
-                                    resultList.add(Pair(id, isFree))
-                                }
-                            }
-
-                            val topModels = listOf(
-                                "glm-5.1", "deepseek-v4-flash", "kimi-k2.6", "minimax-m2.7",
-                                "ling-3.0-flash-fin-free", "mimo-v2.5-free", "mimo-v2.6-flash-free",
-                                "nemotron-3-ultra-free", "space-bunny-free", "claude-sonnet-4-5",
-                                "gemini-3.7-flash", "gpt-5", "big-pickle"
-                            )
-                            return@withContext resultList.sortedWith(
-                                compareByDescending<Pair<String, Boolean>> { topModels.contains(it.first) }
-                                    .thenByDescending { it.second }
-                                    .thenBy { it.first }
-                            )
-                        }
-                    } catch (e: Exception) {
-                        if (e is IllegalStateException) throw e
-                        lastErr = e.message
-                    }
-                }
-                if (lastErr != null) {
-                    throw IllegalStateException("Failed to connect to OpenCode.ai: $lastErr")
-                }
-                return@withContext emptyList()
+        // If models endpoint returned 404 or empty (e.g. DeepSeek or Anthropic without a /models endpoint),
+        // verify key validity with a live probe test before returning fallback models
+        val probeModel = profile.defaultFallbackModels.firstOrNull() ?: "default"
+        val testRes = com.example.llm.LlmClient.testConnection(profile.id, cleanKey, probeModel)
+        if (testRes.success || testRes.error?.category != LlmErrorCategory.AUTH) {
+            return@withContext profile.defaultFallbackModels.map { model ->
+                val isFree = model.contains("free", true) || model.contains("flash", true) || model.contains("lite", true) || model.contains("mini", true)
+                Pair(model, isFree)
             }
-
-            if (effectiveProvider.contains("Anthropic", ignoreCase = true)) {
-                // Test Anthropic key with lightweight validation
-                val testJson = JSONObject().apply {
-                    put("model", "claude-3-5-haiku-20241022")
-                    put("max_tokens", 1)
-                    val msgs = JSONArray().put(JSONObject().apply {
-                        put("role", "user")
-                        put("content", "ping")
-                    })
-                    put("messages", msgs)
-                }
-                val request = Request.Builder()
-                    .url("https://api.anthropic.com/v1/messages")
-                    .post(testJson.toString().toRequestBody("application/json".toMediaType()))
-                    .addHeader("x-api-key", trimmedKey)
-                    .addHeader("anthropic-version", "2023-06-01")
-                    .build()
-                val response = try { client.newCall(request).execute() } catch (e: Exception) { null }
-                if (response != null && (response.code == 401 || response.code == 403)) {
-                    throw IllegalStateException("Invalid Anthropic API Key (${response.code}). Please check your key in settings.")
-                }
-                return@withContext listOf(
-                    Pair("claude-3-5-sonnet-20241022", false),
-                    Pair("claude-3-5-haiku-20241022", false),
-                    Pair("claude-3-haiku-20240307", false),
-                    Pair("claude-3-opus-20240229", false)
-                )
-            }
-
-            // Universal /v1/models endpoint for OpenAI-compatible providers
-            val baseUrl = when {
-                effectiveProvider.startsWith("http://") || effectiveProvider.startsWith("https://") -> if (effectiveProvider.endsWith("/models")) effectiveProvider else "${effectiveProvider.trimEnd('/')}/models"
-                effectiveProvider.contains("DeepSeek", true) -> "https://api.deepseek.com/models"
-                effectiveProvider.contains("Mistral", true) -> "https://api.mistral.ai/v1/models"
-                effectiveProvider.contains("Together", true) -> "https://api.together.xyz/v1/models"
-                effectiveProvider.contains("Cerebras", true) -> "https://api.cerebras.ai/v1/models"
-                effectiveProvider.contains("Fireworks", true) -> "https://api.fireworks.ai/inference/v1/models"
-                effectiveProvider.contains("Sambanova", true) -> "https://api.sambanova.ai/v1/models"
-                effectiveProvider.contains("SiliconFlow", true) -> "https://api.siliconflow.cn/v1/models"
-                effectiveProvider.contains("xAI", true) -> "https://api.x.ai/v1/models"
-                effectiveProvider.contains("Perplexity", true) -> "https://api.perplexity.ai/models"
-                effectiveProvider.contains("OpenRouter", true) -> "https://openrouter.ai/api/v1/models"
-                effectiveProvider.contains("Groq", true) -> "https://api.groq.com/openai/v1/models"
-                effectiveProvider.contains("OpenAI", true) -> "https://api.openai.com/v1/models"
-                effectiveProvider.contains("InceptionLabs", true) -> "https://api.inceptionlabs.ai/v1/models"
-                effectiveProvider.contains("Atria", true) -> "https://api.atria-asi.ai/v1/models"
-                else -> "https://api.openai.com/v1/models"
-            }
-
-            val request = Request.Builder()
-                .url(baseUrl)
-                .get()
-                .addHeader("Authorization", "Bearer $trimmedKey")
-                .addHeader("User-Agent", "Mozilla/5.0 (Linux; Android 14; Mobile) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36")
-                .build()
-
-            val response = try { client.newCall(request).execute() } catch (e: Exception) { null }
-            if (response != null && (response.code == 401 || response.code == 403)) {
-                throw IllegalStateException("Invalid API Key for $effectiveProvider (${response.code}). Please check your key in settings.")
-            }
-            if (response != null && response.isSuccessful) {
-                val json = JSONObject(response.body?.string() ?: "{}")
-                val dataArray = json.optJSONArray("data") ?: JSONArray()
-                val resultList = mutableListOf<Pair<String, Boolean>>()
-                for (i in 0 until dataArray.length()) {
-                    val modelObj = dataArray.getJSONObject(i)
-                    val id = modelObj.optString("id", "")
-
-                    // OpenRouter indicates free models with ":free" or their pricing is 0
-                    // Groq is free. OpenAI has no free ones technically.
-                    var isFree = false
-                    if (effectiveProvider == "OpenRouter" && id.endsWith(":free")) {
-                        isFree = true
-                    } else if (effectiveProvider == "Groq") {
-                        isFree = true // Groq is currently free
-                    } else if (effectiveProvider == "Gemini") {
-                        isFree = true
-                    } else if (effectiveProvider == "InceptionLabs" || effectiveProvider == "Atria ASI") {
-                        isFree = true
-                    }
-
-                    if (id.isNotEmpty()) {
-                        resultList.add(Pair(id, isFree))
-                    }
-                }
-                if (resultList.isNotEmpty()) {
-                    return@withContext resultList.sortedByDescending { it.second }
-                }
-            }
-
-            // Fallbacks for providers if models list API endpoint is not implemented or fails
-            if (effectiveProvider.contains("OpenRouter", true)) {
-                return@withContext listOf(
-                    Pair("meta-llama/llama-3.3-70b-instruct:free", true),
-                    Pair("meta-llama/llama-3.1-8b-instruct:free", true),
-                    Pair("google/gemini-2.0-flash-exp:free", true),
-                    Pair("qwen/qwen-2.5-coder-32b-instruct:free", true),
-                    Pair("mistralai/mistral-7b-instruct:free", true),
-                    Pair("deepseek/deepseek-chat", false),
-                    Pair("google/gemini-2.0-flash-001", false),
-                    Pair("anthropic/claude-3.5-sonnet", false)
-                )
-            }
-            if (effectiveProvider.contains("Groq", true)) {
-                return@withContext listOf(
-                    Pair("llama-3.3-70b-versatile", true),
-                    Pair("llama-3.1-8b-instant", true),
-                    Pair("mixtral-8x7b-32768", true),
-                    Pair("gemma2-9b-it", true)
-                )
-            }
-            if (effectiveProvider.contains("OpenAI", true)) {
-                return@withContext listOf(
-                    Pair("gpt-4o-mini", false),
-                    Pair("gpt-4o", false),
-                    Pair("gpt-4-turbo", false),
-                    Pair("o3-mini", false)
-                )
-            }
-            if (effectiveProvider.contains("DeepSeek", true)) {
-                return@withContext listOf(
-                    Pair("deepseek-chat", true),
-                    Pair("deepseek-coder", true),
-                    Pair("deepseek-reasoner", false)
-                )
-            }
-            if (effectiveProvider.contains("Mistral", true)) {
-                return@withContext listOf(
-                    Pair("mistral-large-latest", false),
-                    Pair("mistral-small-latest", true),
-                    Pair("codestral-latest", false),
-                    Pair("open-mistral-nemo", true)
-                )
-            }
-            if (effectiveProvider.contains("Together", true)) {
-                return@withContext listOf(
-                    Pair("meta-llama/Llama-3.3-70B-Instruct-Turbo", true),
-                    Pair("deepseek-ai/DeepSeek-V3", true),
-                    Pair("Qwen/Qwen2.5-Coder-32B-Instruct", true)
-                )
-            }
-            if (effectiveProvider.contains("Cerebras", true)) {
-                return@withContext listOf(
-                    Pair("llama-3.3-70b", true),
-                    Pair("llama3.1-8b", true)
-                )
-            }
-            if (effectiveProvider.contains("xAI", true)) {
-                return@withContext listOf(
-                    Pair("grok-2-latest", false),
-                    Pair("grok-beta", false)
-                )
-            }
-            if (effectiveProvider.contains("Perplexity", true)) {
-                return@withContext listOf(
-                    Pair("sonar", true),
-                    Pair("sonar-pro", false)
-                )
-            }
-            if (effectiveProvider.contains("InceptionLabs", true)) {
-                return@withContext listOf(
-                    Pair("merlin-32k", true),
-                    Pair("merlin", true),
-                    Pair("merlin-code", false),
-                    Pair("inception-3", false)
-                )
-            }
-            if (effectiveProvider.contains("Atria", true)) {
-                return@withContext listOf(
-                    Pair("atria-1", true),
-                    Pair("asi-chat", true),
-                    Pair("atria-asi-v1", false),
-                    Pair("atria-instruct", false)
-                )
-            }
-            return@withContext emptyList()
-
-        } catch (e: Exception) {
-            Log.e(TAG, "Error fetching models: ${e.message}")
-            if (e is IllegalStateException) throw e
-            throw IllegalStateException("Connection failed: ${e.message ?: "Unknown error"}")
+        } else {
+            val errDetail = testRes.error?.formatHumanMessage() ?: "Authentication rejected by provider"
+            throw IllegalStateException("API Key verification failed for $targetProvider: $errDetail")
         }
     }
 }

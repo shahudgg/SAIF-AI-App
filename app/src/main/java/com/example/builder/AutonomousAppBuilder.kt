@@ -3,12 +3,9 @@ package com.example.builder
 import android.content.Context
 import android.util.Log
 import com.example.compiler.CompilerErrorInfo
-import com.example.data.remote.AIApiUtility
 import com.example.ui.components.CodeEditorViewModel
 import com.example.ui.components.ProjectData
-import com.example.util.ProjectChatHistoryManager
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
 import java.io.File
 
@@ -30,21 +27,15 @@ object AutonomousAppBuilder {
     private const val TAG = "AutonomousAppBuilder"
 
     const val BUILDER_SYSTEM_PROMPT = """You are Saif AI Build, a world-class product designer and senior front-end engineer. The user gives a short or vague idea (English, Hindi or Hinglish). Turn it into a complete, working, beautiful app. Never ask questions; fill the gaps like a senior product team would.
-
 THINK FIRST: work out what the user really wants, then decide the purpose, features, screens and a design direction unique to THIS idea. Never reuse a generic template: a different idea must get a different layout, palette, typography, motion and feature set.
-
 REAL FUNCTIONALITY: working state, interactions, validation, empty states, realistic sample data. Persist with localStorage wrapped in try/catch with an in-memory fallback.
-
 DESIGN: premium modern UI, strong hierarchy, consistent spacing, a curated palette (avoid default blue-purple gradients), 1-2 Google Fonts. It runs inside an Android WebView: mobile-first, touch-friendly (44px targets), 100dvh layouts, safe-area padding, no hover-only interactions, no alert/confirm/prompt (use in-page modals and toasts). Use inline SVG, CSS shapes or emoji instead of external images.
-
 ANIMATION (always high): staggered entrances, scroll reveals, press micro-interactions, animated screen transitions, animated numbers and charts, subtle moving backgrounds. 60fps via transform/opacity; respect prefers-reduced-motion.
-
 OUTPUT: ONLY the raw HTML document starting with <!DOCTYPE html>. Put <!-- saif-ai-build --> right after <head>. All CSS/JS inline; external libraries only as classic <script> tags from a CDN (no ES-module imports, no local fetch), only when useful. No markdown, no commentary, never truncate or write "rest of code here". It must run as-is with zero console errors.
-
 EDITING: if the input has CURRENT_CODE and CHANGE_REQUEST, apply exactly that change, keep everything else intact, and return the FULL updated HTML."""
 
     /**
-     * Executes the autonomous app builder pipeline.
+     * Executes the autonomous app builder pipeline via BuildAgent.
      */
     suspend fun buildOrModifyApp(
         context: Context,
@@ -58,188 +49,103 @@ EDITING: if the input has CURRENT_CODE and CHANGE_REQUEST, apply exactly that ch
     ): AutonomousBuildResult = withContext(Dispatchers.IO) {
         val sanitizedAppName = project.appName.replace(Regex("[^a-zA-Z0-9_]"), "_").ifBlank { "Project" }
         val projectDir = File(context.filesDir, "projects/$sanitizedAppName").apply { mkdirs() }
-        val assetsDir = File(projectDir, "app/src/main/assets").apply { mkdirs() }
-
-        val rootHtmlFile = File(projectDir, "index.html")
-        val assetHtmlFile = File(assetsDir, "index.html")
-
-        val currentHtml = when {
-            rootHtmlFile.exists() && rootHtmlFile.length() > 50 -> rootHtmlFile.readText()
-            assetHtmlFile.exists() && assetHtmlFile.length() > 50 -> assetHtmlFile.readText()
-            else -> ""
-        }
-
-        val lowerPrompt = prompt.lowercase().trim()
-        val isExplicitReset = lowerPrompt.contains("scratch se") || lowerPrompt.contains("purana hatao") ||
-                lowerPrompt.contains("delete karke naya") || lowerPrompt.contains("fresh start") ||
-                lowerPrompt.contains("start fresh") || lowerPrompt.contains("new app from scratch") ||
-                lowerPrompt.contains("reset karo")
-
-        // A file only counts as an existing editable app if it contains <!-- saif-ai-build -->
-        val isExistingApp = currentHtml.contains("<!-- saif-ai-build -->") && !isExplicitReset
-
-        // --------------------------------------------------------------------------------
-        // Stage 1: Planning
-        // --------------------------------------------------------------------------------
-        onProgressUpdate(
-            if (isExistingApp) "🔍 Analyzing current app & planning requested changes..."
-            else "🧠 Understanding vision & designing app architecture...",
-            1
-        )
-        delay(200)
-
-        val userPromptToSend: String
-        val systemPrompt = BUILDER_SYSTEM_PROMPT
-
-        if (isExistingApp) {
-            // Edit mode: fetch last 6 user prompts for context
-            val historyMessages = try {
-                ProjectChatHistoryManager.getMessages(context, project.appName)
-            } catch (e: Exception) {
-                emptyList()
-            }
-            val userHistory = historyMessages
-                .filter { it.sender.equals("user", ignoreCase = true) }
-                .takeLast(6)
-                .map { it.content }
-
-            val historySection = if (userHistory.isNotEmpty()) {
-                "\n\nPROJECT_HISTORY (last user prompts):\n" + userHistory.mapIndexed { idx, p -> "${idx + 1}. $p" }.joinToString("\n")
-            } else ""
-
-            val errorDetails = if (errorInfo != null) {
-                "\n\nRUNTIME/COMPILER ISSUE TO FIX:\n${errorInfo.errorMessage} (${errorInfo.fileName}:${errorInfo.lineNumber})\n${errorInfo.codeSnippet}"
-            } else ""
-
-            userPromptToSend = """
-CURRENT_CODE:
-$currentHtml
-
-CHANGE_REQUEST:
-$prompt$errorDetails$historySection
-
-Please return the FULL updated HTML document starting with <!DOCTYPE html>. Keep all existing functional features and styling intact while surgically applying the change request.
-            """.trimIndent()
-        } else {
-            // Brand new app: user raw prompt + app name. Never wrap, summarize, or shorten!
-            userPromptToSend = "${prompt.trim()}\n\nApp Name: ${project.appName}"
-        }
-
-        // --------------------------------------------------------------------------------
-        // Stage 2: Synthesis & Streaming
-        // --------------------------------------------------------------------------------
-        onProgressUpdate(
-            if (isExistingApp) "⚡ Modifying code & refining UI/UX..."
-            else "⚡ Synthesizing application code, interactions & animations...",
-            2
-        )
-
-        var rawResponse = ""
-        var apiError: Throwable? = null
-
-        suspend fun executeCall(p: String): Result<String> {
-            return AIApiUtility.executeWithFallback(
-                prompt = p,
-                mode = "build",
-                customSystemPrompt = systemPrompt,
-                base64Images = base64Images
-            )
-        }
-
-        val result = executeCall(userPromptToSend)
-        if (result.isSuccess) {
-            rawResponse = result.getOrNull() ?: ""
-        } else {
-            apiError = result.exceptionOrNull()
-        }
-
-        var extractedHtml = extractHtmlDocument(rawResponse)
-
-        // If </html> is missing, output was truncated: retry once
-        if (extractedHtml == null && rawResponse.isNotBlank() && (rawResponse.contains("<!DOCTYPE", ignoreCase = true) || rawResponse.contains("<html", ignoreCase = true))) {
-            Log.w(TAG, "HTML output appeared truncated (missing </html>). Retrying once...")
-            onProgressUpdate("🔄 Output was truncated, resuming full code generation...", 2)
-            val retryPrompt = "$userPromptToSend\n\nIMPORTANT: The previous output was truncated. Return the complete code and ensure the document ends with </html>."
-            val retryResult = executeCall(retryPrompt)
-            if (retryResult.isSuccess) {
-                rawResponse = retryResult.getOrNull() ?: ""
-                extractedHtml = extractHtmlDocument(rawResponse)
-            }
-        }
-
-        // Strict verification: Fail honestly with a clear error, never fall back to a hardcoded template
-        if (extractedHtml == null) {
-            val failureDetail = apiError?.message?.ifBlank { null }
-                ?: if (rawResponse.isBlank()) {
-                    "The AI model returned an empty response. Please verify your API key, model selection, or network connection in Settings (⚙️)."
-                } else if (!rawResponse.contains("</html>", ignoreCase = true)) {
-                    "The code generation was cut off before completion (missing </html>). Please retry with a stronger model or shorter prompt."
-                } else {
-                    "Could not extract a valid HTML document from the model output. Response started with: ${rawResponse.take(180)}..."
-                }
-
-            Log.e(TAG, "Build failed honestly without template fallback: $failureDetail")
-            onProgressUpdate("❌ Build Failed: $failureDetail", 4)
-            return@withContext AutonomousBuildResult(
-                isSuccess = false,
-                summary = "❌ Build Failed: $failureDetail",
-                updatedFiles = emptyList(),
-                rawResponse = rawResponse,
-                error = failureDetail
-            )
-        }
-
-        // --------------------------------------------------------------------------------
-        // Stage 3: Save to Disk & Assets
-        // --------------------------------------------------------------------------------
-        onProgressUpdate("📁 Saving application & syncing assets...", 3)
-        delay(150)
-
-        // Save backup of previous version
-        if (currentHtml.isNotBlank()) {
-            try {
-                File(projectDir, "index.prev.html").writeText(currentHtml)
-                File(assetsDir, "index.prev.html").writeText(currentHtml)
-            } catch (e: Exception) {
-                Log.w(TAG, "Could not write index.prev.html backup", e)
-            }
-        }
-
-        // Ensure <!-- saif-ai-build --> tag exists in HTML right after <head> or at start of <html
-        val finalHtml = ensureSaifBuildTag(extractedHtml)
-
-        // Write to both <projectDir>/index.html and <projectDir>/app/src/main/assets/index.html
-        rootHtmlFile.writeText(finalHtml)
-        assetHtmlFile.writeText(finalHtml)
-
-        // Ensure minimal Android packaging stubs exist so APK packaging succeeds
         ensureAndroidContainerStubs(projectDir, project)
 
-        // Notify editor view model if present
-        try {
-            editorViewModel?.refreshTree(context)
-        } catch (ignored: Exception) {}
-
-        val updatedFiles = listOf("index.html", "app/src/main/assets/index.html")
-
-        // --------------------------------------------------------------------------------
-        // Stage 4: App Ready
-        // --------------------------------------------------------------------------------
-        val summaryText = if (isExistingApp) {
-            "Updated '${project.appName}' successfully based on: $prompt"
+        val fullPrompt = if (errorInfo != null) {
+            "Fix runtime glitch: ${errorInfo.errorMessage} in ${errorInfo.fileName}:${errorInfo.lineNumber}\n${errorInfo.codeSnippet}\n$prompt"
         } else {
-            "Built '${project.appName}' successfully! Fully functional and interactive."
+            prompt
         }
 
-        onProgressUpdate("✅ App Ready! Preview available.", 4)
+        var latestSummary = ""
+        val updatedFiles = mutableListOf<String>()
 
-        AutonomousBuildResult(
-            isSuccess = true,
-            summary = summaryText,
-            updatedFiles = updatedFiles,
-            rawResponse = rawResponse,
-            error = null
+        val result = com.example.builder.agent.BuildAgent.run(
+            context = context,
+            project = project,
+            prompt = fullPrompt,
+            qualityMode = if (isGlitchFix) com.example.builder.agent.QualityMode.BALANCED else com.example.builder.agent.QualityMode.MAX,
+            base64Images = base64Images,
+            onEvent = { event ->
+                when (event) {
+                    is com.example.builder.agent.BuildEvent.PhaseStarted -> {
+                        val stageNum = when (event.phase) {
+                            com.example.builder.agent.BuildPhase.S0_INTAKE,
+                            com.example.builder.agent.BuildPhase.S1_SPEC,
+                            com.example.builder.agent.BuildPhase.S2_PLAN -> 1
+                            com.example.builder.agent.BuildPhase.S3_GENERATE -> 2
+                            com.example.builder.agent.BuildPhase.S4_ASSEMBLE,
+                            com.example.builder.agent.BuildPhase.S5_SANDBOX,
+                            com.example.builder.agent.BuildPhase.S6_FIX,
+                            com.example.builder.agent.BuildPhase.S7_POLISH,
+                            com.example.builder.agent.BuildPhase.S8_COMMIT -> 3
+                            com.example.builder.agent.BuildPhase.S9_REPORT -> 4
+                        }
+                        onProgressUpdate("  ${event.phase.displayName} (${event.index}/${event.total})...", stageNum)
+                    }
+                    is com.example.builder.agent.BuildEvent.Thought -> {
+                        onProgressUpdate("  ${event.summary}", 1)
+                    }
+                    is com.example.builder.agent.BuildEvent.TaskStarted -> {
+                        onProgressUpdate("  Task ${event.id}: ${event.title}...", 2)
+                    }
+                    is com.example.builder.agent.BuildEvent.Writing -> {
+                        onProgressUpdate("  Writing ${event.file} (${event.approxBytes} B)...", 2)
+                    }
+                    is com.example.builder.agent.BuildEvent.Editing -> {
+                        onProgressUpdate("  Patching ${event.file} (${event.hunks} hunks)...", 2)
+                    }
+                    is com.example.builder.agent.BuildEvent.StaticCheck -> {
+                        val status = if (event.passed) "Static checks passed" else "Found issues: ${event.issues.size}"
+                        onProgressUpdate("  $status", 3)
+                    }
+                    is com.example.builder.agent.BuildEvent.SandboxRun -> {
+                        onProgressUpdate("  Sandbox testing: ${event.passedCount}/${event.totalCount} checks passed", 3)
+                    }
+                    is com.example.builder.agent.BuildEvent.Fixing -> {
+                        onProgressUpdate("  Auto-fixing in sandbox (Round ${event.round}): ${event.issueSummary}", 3)
+                    }
+                    is com.example.builder.agent.BuildEvent.Waiting -> {
+                        onProgressUpdate("  Waiting for rate-limit window (${event.seconds}s): ${event.reason}", 2)
+                    }
+                    is com.example.builder.agent.BuildEvent.Committed -> {
+                        updatedFiles.add("index.html")
+                        updatedFiles.add("app/src/main/assets/index.html")
+                        try { editorViewModel?.refreshTree(context) } catch (ignored: Exception) {}
+                        onProgressUpdate("  Committed version v${String.format("%04d", event.version)} to disk", 4)
+                    }
+                    is com.example.builder.agent.BuildEvent.ReportReady -> {
+                        latestSummary = event.summary
+                        onProgressUpdate("  App Ready! Preview & APK available.", 4)
+                    }
+                    is com.example.builder.agent.BuildEvent.Failed -> {
+                        onProgressUpdate("  Build failed: ${event.userMessage}", 4)
+                    }
+                    else -> {}
+                }
+            }
         )
+
+        if (result.isSuccess) {
+            val rootHtml = File(projectDir, "index.html")
+            val raw = if (rootHtml.exists()) rootHtml.readText() else ""
+            AutonomousBuildResult(
+                isSuccess = true,
+                summary = latestSummary.ifBlank { "Built '${project.appName}' successfully!" },
+                updatedFiles = if (updatedFiles.isNotEmpty()) updatedFiles else listOf("index.html", "app/src/main/assets/index.html"),
+                rawResponse = raw,
+                error = null
+            )
+        } else {
+            val errMsg = result.exceptionOrNull()?.message ?: "Build failed"
+            AutonomousBuildResult(
+                isSuccess = false,
+                summary = "  Build Failed: $errMsg",
+                updatedFiles = emptyList(),
+                rawResponse = "",
+                error = errMsg
+            )
+        }
     }
 
     /**
@@ -270,6 +176,51 @@ Please return the FULL updated HTML document starting with <!DOCTYPE html>. Keep
     }
 
     /**
+     * Heals an almost complete HTML document cut off before closing tags.
+     * Safely closes open <script>, <style>, <body>, and <html> tags.
+     */
+    fun healTruncatedHtml(rawOutput: String): String? {
+        if (rawOutput.isBlank() || rawOutput.length < 150) return null
+        val lower = rawOutput.lowercase()
+        val docTypeIdx = lower.indexOf("<!doctype html")
+        val htmlIdx = lower.indexOf("<html")
+        val startIdx = when {
+            docTypeIdx != -1 && htmlIdx != -1 -> Math.min(docTypeIdx, htmlIdx)
+            docTypeIdx != -1 -> docTypeIdx
+            htmlIdx != -1 -> htmlIdx
+            else -> -1
+        }
+        if (startIdx == -1) return null
+
+        var trimmed = rawOutput.substring(startIdx).trim()
+        val lowerTrimmed = trimmed.lowercase()
+
+        // Must have at least an opening body tag or head tag
+        if (!lowerTrimmed.contains("<body") && !lowerTrimmed.contains("<head")) return null
+
+        val openScriptCount = Regex("<script[^>]*>", RegexOption.IGNORE_CASE).findAll(trimmed).count()
+        val closeScriptCount = Regex("</script>", RegexOption.IGNORE_CASE).findAll(trimmed).count()
+        if (openScriptCount > closeScriptCount) {
+            trimmed += "\n</script>"
+        }
+
+        val openStyleCount = Regex("<style[^>]*>", RegexOption.IGNORE_CASE).findAll(trimmed).count()
+        val closeStyleCount = Regex("</style>", RegexOption.IGNORE_CASE).findAll(trimmed).count()
+        if (openStyleCount > closeStyleCount) {
+            trimmed += "\n</style>"
+        }
+
+        if (!trimmed.lowercase().contains("</body>")) {
+            trimmed += "\n</body>"
+        }
+        if (!trimmed.lowercase().contains("</html>")) {
+            trimmed += "\n</html>"
+        }
+
+        return if (trimmed.endsWith("</html>", ignoreCase = true)) trimmed else null
+    }
+
+    /**
      * Ensures the marker <!-- saif-ai-build --> is present right after <head> or at the top of <html.
      */
     private fun ensureSaifBuildTag(html: String): String {
@@ -296,7 +247,7 @@ Please return the FULL updated HTML document starting with <!DOCTYPE html>. Keep
      * Ensures stub MainActivity and AndroidManifest.xml exist in projectDir
      * so that packaging into standalone APK can proceed cleanly.
      */
-    private fun ensureAndroidContainerStubs(projectDir: File, project: ProjectData) {
+    fun ensureAndroidContainerStubs(projectDir: File, project: ProjectData) {
         try {
             val pkgPath = project.packageName.replace('.', '/')
             val javaDir = File(projectDir, "app/src/main/java/$pkgPath").apply { mkdirs() }

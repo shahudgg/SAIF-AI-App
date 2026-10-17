@@ -9,6 +9,8 @@ import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.togetherWith
+import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
@@ -54,6 +56,7 @@ fun SaifHeader(
     onNewChat: () -> Unit,
     onOpenSettings: () -> Unit,
     onPlusClick: () -> Unit,
+    onNewVideoProjectClick: () -> Unit = {},
     isFilterBookmarked: Boolean,
     onToggleBookmarkFilter: () -> Unit,
     onUpgradeClick: () -> Unit,
@@ -164,8 +167,12 @@ fun SaifHeader(
                     )
                 }
 
-                // Right side: Admin Crown, Upgrade, Theme Toggle, Settings, Add
-                Row(verticalAlignment = Alignment.CenterVertically) {
+                // Right side: Admin Crown, Upgrade, Theme, Settings, Purple Video Plus, Orange App Plus
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(4.dp),
+                    modifier = Modifier.horizontalScroll(rememberScrollState())
+                ) {
                     // Admin Crown Button (Shows only for Admin role)
                     val currentAuthUser by com.example.data.local.AuthManager.currentUser.collectAsState()
                     if (currentAuthUser?.isAdmin == true) {
@@ -174,7 +181,7 @@ fun SaifHeader(
                             shape = RoundedCornerShape(18.dp),
                             color = Color(0x33F59E0B),
                             border = androidx.compose.foundation.BorderStroke(1.dp, Color(0xFFF59E0B).copy(alpha = 0.8f)),
-                            modifier = Modifier.padding(end = 6.dp)
+                            modifier = Modifier.padding(horizontal = 2.dp)
                         ) {
                             Row(
                                 verticalAlignment = Alignment.CenterVertically,
@@ -235,7 +242,7 @@ fun SaifHeader(
                         ) {
                             Row(
                                 verticalAlignment = Alignment.CenterVertically,
-                                modifier = Modifier.padding(horizontal = 10.dp, vertical = 5.dp)
+                                modifier = Modifier.padding(horizontal = 8.dp, vertical = 5.dp)
                             ) {
                                 Icon(
                                     imageVector = Icons.Outlined.AutoAwesome,
@@ -243,18 +250,16 @@ fun SaifHeader(
                                     tint = Color(0xFFA855F7),
                                     modifier = Modifier.size(14.dp)
                                 )
-                                Spacer(modifier = Modifier.width(4.dp))
+                                Spacer(modifier = Modifier.width(3.dp))
                                 Text(
                                     text = "Upgrade",
                                     color = Color(0xFFA855F7),
-                                    fontSize = 12.sp,
+                                    fontSize = 11.sp,
                                     fontWeight = FontWeight.SemiBold
                                 )
                             }
                         }
                     }
-
-                    Spacer(modifier = Modifier.width(4.dp))
 
                     // Theme Icon Animation
                     val themeInteractionSource = remember { MutableInteractionSource() }
@@ -319,7 +324,7 @@ fun SaifHeader(
                         onClick = onOpenSettings,
                         interactionSource = settingsInteraction,
                         modifier = Modifier
-                            .size(40.dp)
+                            .size(36.dp)
                             .scale(settingsScale)
                             .graphicsLayer {
                                 rotationZ = settingsRotation
@@ -333,33 +338,85 @@ fun SaifHeader(
                         )
                     }
 
-                    // Plus / Project Builder Button (Normal prominent size)
-                    val plusInteraction = remember { MutableInteractionSource() }
-                    val isPlusPressed by plusInteraction.collectIsPressedAsState()
-                    val plusScale by animateFloatAsState(
-                        targetValue = if (isPlusPressed) 0.82f else 1f,
+                    // 1. Purple Video Studio Plus Button (AI Video Director & Video Project Studio)
+                    val videoPlusInteraction = remember { MutableInteractionSource() }
+                    val isVideoPlusPressed by videoPlusInteraction.collectIsPressedAsState()
+                    val videoPlusScale by animateFloatAsState(
+                        targetValue = if (isVideoPlusPressed) 0.80f else 1f,
                         animationSpec = spring(dampingRatio = Spring.DampingRatioHighBouncy, stiffness = Spring.StiffnessLow),
-                        label = "PlusScale"
+                        label = "VideoPlusScale"
                     )
                     IconButton(
-                        onClick = onPlusClick,
-                        interactionSource = plusInteraction,
+                        onClick = onNewVideoProjectClick,
+                        interactionSource = videoPlusInteraction,
                         modifier = Modifier
-                            .size(44.dp)
-                            .scale(plusScale)
+                            .size(36.dp)
+                            .scale(videoPlusScale)
                     ) {
                         Surface(
                             shape = CircleShape,
-                            color = Color(0x22F97316),
-                            border = androidx.compose.foundation.BorderStroke(1.dp, Color(0xFFF97316).copy(alpha = 0.5f)),
-                            modifier = Modifier.size(34.dp)
+                            color = Color(0x33A855F7),
+                            border = androidx.compose.foundation.BorderStroke(1.5.dp, Color(0xFFC084FC)),
+                            shadowElevation = 6.dp,
+                            modifier = Modifier.size(32.dp)
                         ) {
-                            Box(contentAlignment = Alignment.Center) {
+                            Box(
+                                modifier = Modifier
+                                    .fillMaxSize()
+                                    .background(
+                                        Brush.linearGradient(
+                                            listOf(Color(0xFF7C3AED), Color(0xFFA855F7), Color(0xFF06B6D4))
+                                        )
+                                    ),
+                                contentAlignment = Alignment.Center
+                            ) {
                                 Icon(
                                     imageVector = Icons.Default.Add,
-                                    contentDescription = "Configure Project",
-                                    tint = Color(0xFFF97316),
-                                    modifier = Modifier.size(22.dp)
+                                    contentDescription = "New Video Project Studio (+ Video)",
+                                    tint = Color.White,
+                                    modifier = Modifier.size(19.dp)
+                                )
+                            }
+                        }
+                    }
+
+                    // 2. Original Orange App Creator Plus Button (Apk & App Creation Project)
+                    val appPlusInteraction = remember { MutableInteractionSource() }
+                    val isAppPlusPressed by appPlusInteraction.collectIsPressedAsState()
+                    val appPlusScale by animateFloatAsState(
+                        targetValue = if (isAppPlusPressed) 0.80f else 1f,
+                        animationSpec = spring(dampingRatio = Spring.DampingRatioHighBouncy, stiffness = Spring.StiffnessLow),
+                        label = "AppPlusScale"
+                    )
+                    IconButton(
+                        onClick = onPlusClick,
+                        interactionSource = appPlusInteraction,
+                        modifier = Modifier
+                            .size(36.dp)
+                            .scale(appPlusScale)
+                    ) {
+                        Surface(
+                            shape = CircleShape,
+                            color = Color(0x33F97316),
+                            border = androidx.compose.foundation.BorderStroke(1.5.dp, Color(0xFFFB923C).copy(alpha = 0.9f)),
+                            shadowElevation = 6.dp,
+                            modifier = Modifier.size(32.dp)
+                        ) {
+                            Box(
+                                modifier = Modifier
+                                    .fillMaxSize()
+                                    .background(
+                                        Brush.linearGradient(
+                                            listOf(Color(0xFFEA580C), Color(0xFFF97316))
+                                        )
+                                    ),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.Add,
+                                    contentDescription = "New App Project (+ App)",
+                                    tint = Color.White,
+                                    modifier = Modifier.size(19.dp)
                                 )
                             }
                         }

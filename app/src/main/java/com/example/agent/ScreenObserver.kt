@@ -9,8 +9,10 @@ import com.example.util.SaifAccessibilityService
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.security.MessageDigest
+import java.util.concurrent.atomic.AtomicLong
 
 data class UiElement(
+    val id: String, // Snapshot-scoped id, e.g. "s1e4"
     val idx: Int,
     val role: String,
     val text: String,
@@ -20,6 +22,8 @@ data class UiElement(
     val viewId: String,
     val bounds: Rect,
     val norm: List<Int>, // [ymin, xmin, ymax, xmax] in 0..999 scale
+    val cx: Int, // Normalized center X in 0..999
+    val cy: Int, // Normalized center Y in 0..999
     val clickable: Boolean,
     val longClickable: Boolean,
     val editable: Boolean,
@@ -32,11 +36,12 @@ data class UiElement(
 )
 
 data class ScreenSnapshot(
+    val snapshotId: String,
     val packageName: String,
+    val activityClass: String,
     val windowTitle: String,
-    val activityHint: String,
     val keyboardVisible: Boolean,
-    val focusedInputIdx: Int,
+    val focusedInputId: String?,
     val hasScrollable: Boolean,
     val secure: Boolean,
     val isLocked: Boolean,
@@ -44,19 +49,23 @@ data class ScreenSnapshot(
     val displayHeight: Int,
     val elements: List<UiElement>,
     val screenshotJpegBase64: String?,
-    val fingerprint: String
+    val fingerprint: String,
+    val screenSignature: String
 ) {
-    fun toCompactText(maxChars: Int = 7000): String {
+    fun toCompactText(maxChars: Int = 7500): String {
         val sb = StringBuilder()
         sb.append("PKG: ").append(packageName)
+        if (activityClass.isNotBlank()) sb.append(" | ACTIVITY: ").append(activityClass)
         if (windowTitle.isNotBlank()) sb.append(" | TITLE: ").append(windowTitle)
         if (keyboardVisible) sb.append(" [KEYBOARD_OPEN]")
-        if (secure) sb.append(" [SECURE/BLACK_SCREEN]")
-        sb.append("\nELEMENTS:\n")
+        if (secure) sb.append(" [SECURE/PROTECTED_SCREEN]")
+        sb.append(" | SIGNATURE: ").append(screenSignature)
+        sb.append("\nLEGEND: [id] role \"text\" desc=\"...\" id=viewId [box=(ymin,xmin,ymax,xmax) center=(cx,cy)] (scale 0-999)\n")
+        sb.append("ELEMENTS:\n")
 
         for (el in elements) {
             val line = StringBuilder()
-            line.append("[${el.idx}] ").append(el.role)
+            line.append("[${el.id}] ").append(el.role)
             if (el.text.isNotBlank()) line.append(" \"").append(el.text).append("\"")
             if (el.desc.isNotBlank() && el.desc != el.text) line.append(" desc=\"").append(el.desc).append("\"")
             if (el.viewId.isNotBlank()) line.append(" id=").append(el.viewId)
@@ -65,7 +74,7 @@ data class ScreenSnapshot(
             if (el.focused) line.append(" focused")
             if (el.selected) line.append(" selected")
             if (el.scrollable) line.append(" scrollable")
-            line.append(" [${el.norm.joinToString(",")}]\n")
+            line.append(" [box=(${el.norm.joinToString(",")}) center=(${el.cx},${el.cy})]\n")
 
             if (sb.length + line.length > maxChars) {
                 sb.append("... [truncated ").append(elements.size - el.idx).append(" elements]\n")
@@ -82,40 +91,74 @@ object ScreenObserver {
     private const val MAX_ELEMENTS = 450
     private const val OVERLAY_PACKAGE = "com.saifai.assistant"
 
-    // Snapshot node registry for the current frame
-    private val nodeRegistry = mutableMapOf<Int, AccessibilityNodeInfo>()
+    private val snapshotSequence = AtomicLong(1L)
+
+    // Snapshot-scoped node registries: keeps the last 5 snapshots alive to eliminate stale-index bugs
+    private val snapshotRegistries = mutableMapOf<String, MutableMap<String, AccessibilityNodeInfo>>()
+    private val recentSnapshotOrder = mutableListOf<String>()
 
     @Synchronized
-    fun registerNode(idx: Int, node: AccessibilityNodeInfo) {
-        nodeRegistry[idx] = node
+    fun registerNode(snapshotId: String, elementId: String, node: AccessibilityNodeInfo) {
+        val registry = snapshotRegistries.getOrPut(snapshotId) { mutableMapOf() }
+        registry[elementId] = node
     }
 
     @Synchronized
-    fun getNode(idx: Int): AccessibilityNodeInfo? {
-        val node = nodeRegistry[idx] ?: return null
-        return try {
-            // Test if node is still valid
-            node.refresh()
-            node
-        } catch (e: Exception) {
-            null
+    fun getNode(elementIdOrIndex: String, targetSnapshotId: String? = null): AccessibilityNodeInfo? {
+        val clean = elementIdOrIndex.trim()
+        if (clean.isBlank()) return null
+
+        // 1. If target snapshot specified, search it first
+        if (targetSnapshotId != null) {
+            val reg = snapshotRegistries[targetSnapshotId]
+            val node = reg?.get(clean)
+            if (node != null) {
+                return try {
+                    if (node.refresh()) node else null
+                } catch (e: Exception) { null }
+            }
         }
+
+        // 2. Search most recent snapshot registry
+        for (snapId in recentSnapshotOrder.reversed()) {
+            val reg = snapshotRegistries[snapId] ?: continue
+            val node = reg[clean] ?: reg["${snapId}e$clean"]
+            if (node != null) {
+                return try {
+                    if (node.refresh()) node else null
+                } catch (e: Exception) { null }
+            }
+        }
+
+        return null
     }
 
     @Synchronized
-    fun clearRegistry() {
-        nodeRegistry.clear()
+    private fun pruneOldRegistries() {
+        while (recentSnapshotOrder.size > 5) {
+            val oldest = recentSnapshotOrder.removeAt(0)
+            snapshotRegistries.remove(oldest)
+        }
     }
 
     suspend fun capture(withScreenshot: Boolean = true): ScreenSnapshot = withContext(Dispatchers.Default) {
         val service = SaifAccessibilityService.instance
+        val currentSnapId = "s${snapshotSequence.getAndIncrement()}"
+
+        synchronized(ScreenObserver) {
+            recentSnapshotOrder.add(currentSnapId)
+            snapshotRegistries[currentSnapId] = mutableMapOf()
+            pruneOldRegistries()
+        }
+
         if (service == null) {
             return@withContext ScreenSnapshot(
+                snapshotId = currentSnapId,
                 packageName = "",
+                activityClass = "",
                 windowTitle = "Service Disabled",
-                activityHint = "",
                 keyboardVisible = false,
-                focusedInputIdx = -1,
+                focusedInputId = null,
                 hasScrollable = false,
                 secure = false,
                 isLocked = false,
@@ -123,24 +166,22 @@ object ScreenObserver {
                 displayHeight = 2400,
                 elements = emptyList(),
                 screenshotJpegBase64 = null,
-                fingerprint = "NO_SERVICE"
+                fingerprint = "NO_SERVICE",
+                screenSignature = "NO_SERVICE"
             )
         }
 
-        clearRegistry()
-
-        // 1. Dimensions
         val metrics = service.getRealDisplayMetrics()
         val displayW = metrics.first.coerceAtLeast(1)
         val displayH = metrics.second.coerceAtLeast(1)
 
-        // 2. Windows traversal & UI hierarchy gathering
         var currentPkg = service.getCurrentPackage()
-        var windowTitle = ""
+        val activityClass = service.currentActivityClass
+        var windowTitle = service.currentWindowTitle
         var keyboardVisible = false
         var hasScrollable = false
-        var focusedInputIdx = -1
-        var isLocked = false
+        var focusedInputId: String? = null
+        val isLocked = false
 
         val rawElements = mutableListOf<UiElement>()
         val windows = try {
@@ -152,14 +193,15 @@ object ScreenObserver {
         val rootsToVisit = mutableListOf<AccessibilityNodeInfo>()
         if (windows.isNotEmpty()) {
             for (window in windows) {
-                // Check if window is input method (keyboard)
                 if (window.type == AccessibilityWindowInfo.TYPE_INPUT_METHOD) {
                     keyboardVisible = true
                 }
-                // Skip SAIF AI's own overlay window
                 val title = window.title?.toString() ?: ""
                 if (title.contains("SAIF", ignoreCase = true) || title.contains("AssistantOverlay", ignoreCase = true)) {
                     continue
+                }
+                if (windowTitle.isBlank() && title.isNotBlank()) {
+                    windowTitle = title
                 }
                 val root = window.root
                 if (root != null) {
@@ -171,7 +213,6 @@ object ScreenObserver {
             }
         }
 
-        // Always fallback or supplement with rootInActiveWindow
         val activeRoot = service.rootInActiveWindow
         if (activeRoot != null) {
             val activePkg = activeRoot.packageName?.toString() ?: ""
@@ -195,7 +236,6 @@ object ScreenObserver {
             val bounds = Rect()
             node.getBoundsInScreen(bounds)
 
-            // Ignore off-screen or zero-size elements
             if (bounds.width() <= 0 || bounds.height() <= 0) return
             if (bounds.right <= 0 || bounds.bottom <= 0 || bounds.left >= displayW || bounds.top >= displayH) return
 
@@ -217,7 +257,6 @@ object ScreenObserver {
 
             if (isScroll) hasScrollable = true
 
-            // Retain node if interactive or has semantic text/desc
             val isMeaningful = isClickable || isLongClickable || isEditable || isScroll ||
                     text.isNotBlank() || desc.isNotBlank() || hint.isNotBlank() || stateDesc.isNotBlank()
 
@@ -225,18 +264,26 @@ object ScreenObserver {
             if (isMeaningful) {
                 val idx = elementIndexCounter++
                 myIdx = idx
-                registerNode(idx, node)
+                val elementId = "${currentSnapId}e$idx"
+
+                // Register both with snapshot-scoped id and numeric idx
+                registerNode(currentSnapId, elementId, node)
+                registerNode(currentSnapId, idx.toString(), node)
 
                 if (isEditable && isFocused) {
-                    focusedInputIdx = idx
+                    focusedInputId = elementId
                 }
 
-                // Compute normalized 0..999 coordinates: [ymin, xmin, ymax, xmax]
+                // Explicit normalized box: [ymin, xmin, ymax, xmax] in 0..999
                 val ymin = ((bounds.top.toFloat() / displayH) * 1000).toInt().coerceIn(0, 999)
                 val xmin = ((bounds.left.toFloat() / displayW) * 1000).toInt().coerceIn(0, 999)
                 val ymax = ((bounds.bottom.toFloat() / displayH) * 1000).toInt().coerceIn(0, 999)
                 val xmax = ((bounds.right.toFloat() / displayW) * 1000).toInt().coerceIn(0, 999)
                 val norm = listOf(ymin, xmin, ymax, xmax)
+
+                // Exact normalized center
+                val cx = ((bounds.centerX().toFloat() / displayW) * 1000).toInt().coerceIn(0, 999)
+                val cy = ((bounds.centerY().toFloat() / displayH) * 1000).toInt().coerceIn(0, 999)
 
                 val className = (node.className?.toString() ?: "").lowercase()
                 val role = when {
@@ -253,6 +300,7 @@ object ScreenObserver {
 
                 rawElements.add(
                     UiElement(
+                        id = elementId,
                         idx = idx,
                         role = role,
                         text = text,
@@ -262,6 +310,8 @@ object ScreenObserver {
                         viewId = shortViewId,
                         bounds = bounds,
                         norm = norm,
+                        cx = cx,
+                        cy = cy,
                         clickable = isClickable,
                         longClickable = isLongClickable,
                         editable = isEditable,
@@ -289,12 +339,10 @@ object ScreenObserver {
             }
         }
 
-        // Sort elements top-to-bottom, left-to-right
         val sortedElements = rawElements.sortedWith(
             compareBy<UiElement> { it.bounds.top }.thenBy { it.bounds.left }
         )
 
-        // 3. Optional Screenshot
         var screenshotBase64: String? = null
         var isSecure = false
 
@@ -304,27 +352,27 @@ object ScreenObserver {
             isSecure = shotResult.isSecure
         }
 
-        // 4. Fingerprint computation (Package + top element text hash)
-        val fpBuilder = StringBuilder().append(currentPkg).append(":")
-        for (el in sortedElements.take(15)) {
-            if (el.text.isNotBlank()) fpBuilder.append(el.text).append("|")
-            else if (el.desc.isNotBlank()) fpBuilder.append(el.desc).append("|")
-            else if (el.viewId.isNotBlank()) fpBuilder.append(el.viewId).append("|")
-        }
-        val fingerprint = try {
+        // Order-independent screen signature hashing package, activity, and visible view identifiers
+        val sigTokens = sortedElements.map {
+            "${it.role}:${it.viewId}:${it.text.take(15)}:${it.desc.take(15)}"
+        }.sorted()
+
+        val fullSigString = "$currentPkg:$activityClass:${sigTokens.joinToString(",")}"
+        val screenSignature = try {
             val md = MessageDigest.getInstance("MD5")
-            val bytes = md.digest(fpBuilder.toString().toByteArray())
-            bytes.joinToString("") { "%02x".format(it) }.take(12)
+            val bytes = md.digest(fullSigString.toByteArray())
+            bytes.joinToString("") { "%02x".format(it) }.take(16)
         } catch (e: Exception) {
-            fpBuilder.toString().take(16)
+            fullSigString.take(16)
         }
 
         ScreenSnapshot(
+            snapshotId = currentSnapId,
             packageName = currentPkg,
+            activityClass = activityClass,
             windowTitle = windowTitle,
-            activityHint = "",
             keyboardVisible = keyboardVisible,
-            focusedInputIdx = focusedInputIdx,
+            focusedInputId = focusedInputId,
             hasScrollable = hasScrollable,
             secure = isSecure,
             isLocked = isLocked,
@@ -332,7 +380,8 @@ object ScreenObserver {
             displayHeight = displayH,
             elements = sortedElements,
             screenshotJpegBase64 = screenshotBase64,
-            fingerprint = fingerprint
+            fingerprint = screenSignature,
+            screenSignature = screenSignature
         )
     }
 }

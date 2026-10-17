@@ -5,8 +5,12 @@ on:
     branches: [ "**" ]
   workflow_dispatch:
 
+permissions:
+  contents: write
+
 jobs:
   build:
+    name: Build Release and Debug APK
     runs-on: ubuntu-latest
 
     steps:
@@ -39,14 +43,61 @@ jobs:
               -validity 10000
             echo "Generated fallback debug.keystore"
           fi
-          ls -la ./debug.keystore
 
-      - name: Build APK with Gradle
-        run: gradle :app:assembleDebug --stacktrace
+      - name: Restore Release Keystore
+        env:
+          KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
+        run: |
+          if [ -n "$KEYSTORE_BASE64" ]; then
+            echo "$KEYSTORE_BASE64" | base64 -d > ./my-upload-key.jks
+            echo "Successfully restored release keystore from secrets"
+          else
+            echo "No release keystore secret found. Release build will use fallback signing."
+          fi
 
-      - name: Upload Debug APK
+      - name: Build APKs with Gradle
+        env:
+          STORE_PASSWORD: ${{ secrets.STORE_PASSWORD }}
+          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+          KEYSTORE_PATH: "./my-upload-key.jks"
+        run: |
+          gradle :app:assembleDebug :app:assembleRelease --stacktrace
+
+      - name: Upload Debug APK Artifact
         uses: actions/upload-artifact@v4
         with:
           name: SAIF-AI-Debug-APK
           path: app/build/outputs/apk/debug/*.apk
           retention-days: 14
+
+      - name: Upload Release APK Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: SAIF-AI-Release-APK
+          path: app/build/outputs/apk/release/*.apk
+          retention-days: 30
+
+      - name: Prepare Direct APK for Release
+        run: |
+          mkdir -p release-out
+          if ls app/build/outputs/apk/release/*.apk 1> /dev/null 2>&1; then
+            cp app/build/outputs/apk/release/*.apk release-out/SAIF-AI-release.apk
+          fi
+          if ls app/build/outputs/apk/debug/*.apk 1> /dev/null 2>&1; then
+            cp app/build/outputs/apk/debug/*.apk release-out/SAIF-AI-debug.apk
+          fi
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master'
+        with:
+          tag_name: latest-release
+          name: "SAIF AI - Latest Release & Debug APKs"
+          body: |
+            ### SAIF AI Latest Update
+            - **Release APK (Optimized, R8 minified & shrinked, Play Protect hardened)**
+            - **Debug APK (For development and testing)**
+            - Universal BYOK AI engine (Groq, xAI, Gemini, OpenAI, OpenRouter)
+          files: release-out/*.apk
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

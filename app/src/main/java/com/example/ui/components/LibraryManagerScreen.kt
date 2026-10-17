@@ -58,6 +58,10 @@ fun LibraryManagerScreen(
     val projectDir = remember(sanitizedApp) {
         File(context.filesDir, "projects/$sanitizedApp")
     }
+
+    androidx.activity.compose.BackHandler {
+        onBack()
+    }
     val gradleFile = remember(projectDir) {
         File(projectDir, "app/build.gradle")
     }

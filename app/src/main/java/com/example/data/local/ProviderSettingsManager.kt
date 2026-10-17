@@ -2,6 +2,8 @@ package com.example.data.local
 
 import android.content.Context
 import android.content.SharedPreferences
+import com.example.llm.KeyStoreCrypto
+import com.example.llm.ModelLimitsStore
 import org.json.JSONArray
 import org.json.JSONObject
 
@@ -10,30 +12,79 @@ data class ProviderState(
     var apiKeys: List<String> = emptyList(),
     var activeModel: String = "gemini-2.5-flash",
     var buildModel: String = "gemini-2.5-flash",
-    var currentKeyIndex: Int = 0
+    var currentKeyIndex: Int = 0,
+    var allowFallbackToOtherProviders: Boolean = true
 )
 
 object ProviderSettingsManager {
     private const val PREFS_NAME = "ProviderSettingsPrefs"
-    private const val KEY_STATE = "provider_state_v7"
+    private const val KEY_STATE = "provider_state_v8"
+    private const val LEGACY_KEY_STATE = "provider_state_v7"
     private var prefs: SharedPreferences? = null
 
     fun init(context: Context) {
         prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        ModelLimitsStore.init(context)
     }
 
-    private fun sanitizeModelName(model: String): String {
+    private fun sanitizeModelName(provider: String, model: String): String {
         val trimmed = model.trim()
-        if (trimmed.isBlank() || trimmed.contains("gemini-2.0") || trimmed.contains("gemini-1.5") || trimmed.contains("gemini-3.8") || trimmed.contains("gemini-3.7") || trimmed.contains("gemini-3.6")) {
-            return "gemini-2.5-flash"
+        val isGemini = provider.equals("Gemini", ignoreCase = true)
+        if (isGemini) {
+            if (trimmed.isBlank() || trimmed.contains("gemini-2.0") || trimmed.contains("gemini-1.5") || trimmed.contains("gemini-3.8") || trimmed.contains("gemini-3.7") || trimmed.contains("gemini-3.6")) {
+                return "gemini-2.5-flash"
+            }
+            return trimmed
+        }
+        if (provider.contains("atria", ignoreCase = true)) {
+            if (trimmed.isBlank() || trimmed.equals("atria-1", true) || trimmed.equals("atria-dawn", true) || trimmed.contains("dawn", true)) {
+                return if (trimmed.contains("FP8", true)) "Atria-Dawn-Preview-FP8" else "Atria-Dawn-Preview"
+            }
+        }
+        if (provider.contains("inception", ignoreCase = true)) {
+            if (trimmed.isBlank() || trimmed.contains("merlin", true)) {
+                return "mercury-2.5"
+            }
+        }
+        if (provider.contains("Ashna", ignoreCase = true) || provider.contains("Asana", ignoreCase = true)) {
+            if (trimmed.isBlank() || trimmed.contains("gemini", true)) {
+                return "ashna-x1"
+            }
+            return trimmed
+        }
+        if (trimmed.isBlank() || (trimmed.contains("gemini-", ignoreCase = true) && !provider.contains("OpenRouter", ignoreCase = true) && !provider.contains("Ashna", ignoreCase = true))) {
+            return com.example.llm.ProviderProfile.getById(provider).defaultFallbackModels.firstOrNull() ?: "default"
         }
         return trimmed
     }
 
-    private fun sanitizeBuildModelName(model: String): String {
+    private fun sanitizeBuildModelName(provider: String, model: String): String {
         val trimmed = model.trim()
-        if (trimmed.isBlank() || trimmed.contains("gemini-2.0") || trimmed.contains("gemini-1.5") || trimmed.contains("gemini-3.8") || trimmed.contains("gemini-3.7") || trimmed.contains("gemini-3.6")) {
-            return "gemini-2.5-flash"
+        val isGemini = provider.equals("Gemini", ignoreCase = true)
+        if (isGemini) {
+            if (trimmed.isBlank() || trimmed.contains("gemini-2.0") || trimmed.contains("gemini-1.5") || trimmed.contains("gemini-3.8") || trimmed.contains("gemini-3.7") || trimmed.contains("gemini-3.6")) {
+                return "gemini-2.5-flash"
+            }
+            return trimmed
+        }
+        if (provider.contains("atria", ignoreCase = true)) {
+            if (trimmed.isBlank() || trimmed.equals("atria-1", true) || trimmed.equals("atria-dawn", true) || trimmed.contains("dawn", true)) {
+                return if (trimmed.contains("FP8", true)) "Atria-Dawn-Preview-FP8" else "Atria-Dawn-Preview"
+            }
+        }
+        if (provider.contains("inception", ignoreCase = true)) {
+            if (trimmed.isBlank() || trimmed.contains("merlin", true)) {
+                return "mercury-2.5"
+            }
+        }
+        if (provider.contains("Ashna", ignoreCase = true) || provider.contains("Asana", ignoreCase = true)) {
+            if (trimmed.isBlank() || trimmed.contains("gemini", true)) {
+                return "ashna-x1"
+            }
+            return trimmed
+        }
+        if (trimmed.isBlank() || (trimmed.contains("gemini-", ignoreCase = true) && !provider.contains("OpenRouter", ignoreCase = true) && !provider.contains("Ashna", ignoreCase = true))) {
+            return com.example.llm.ProviderProfile.getById(provider).defaultFallbackModels.firstOrNull() ?: "default"
         }
         return trimmed
     }
@@ -45,45 +96,69 @@ object ProviderSettingsManager {
 
     fun loadState(): ProviderState {
         val jsonStr = prefs?.getString(KEY_STATE, null)
+            ?: prefs?.getString(LEGACY_KEY_STATE, null)
+
         if (jsonStr == null) {
             return ProviderState(
                 providerName = "Gemini",
                 activeModel = "gemini-2.5-flash",
                 buildModel = "gemini-2.5-flash",
-                apiKeys = emptyList()
+                apiKeys = emptyList(),
+                allowFallbackToOtherProviders = true
             )
         }
         return try {
             val json = JSONObject(jsonStr)
-            val parsedKeys = jsonArrayToList(json.optJSONArray("apiKeys")).filter { it.isNotBlank() }
+            val rawKeys = jsonArrayToList(json.optJSONArray("apiKeys")).filter { it.isNotBlank() }
+
+            // Decrypt keys that were encrypted with KeyStore; plain keys are read as-is (seamless migration)
+            val parsedKeys = rawKeys.map { rawKey ->
+                if (rawKey.startsWith("ENC:")) {
+                    KeyStoreCrypto.decrypt(rawKey).ifBlank { rawKey.removePrefix("ENC:") }.trim()
+                } else {
+                    rawKey.trim()
+                }
+            }.filter { it.isNotBlank() && !it.contains("MY_") }
+
             val rawModel = json.optString("activeModel", "gemini-2.5-flash")
             val rawBuildModel = json.optString("buildModel", "gemini-2.5-flash")
             var savedProvider = json.optString("providerName", "Gemini")
+            val allowFallback = json.optBoolean("allowFallbackToOtherProviders", true)
 
-            // Clean only template dummy placeholders, preserve all real user API keys
+            // Clean template placeholders
             val cleanedKeys = parsedKeys.filter { k ->
                 val trimmed = k.trim()
                 !trimmed.contains("MY_")
             }
 
-            // Normalization
             if (savedProvider.equals("OpenCode Zen", ignoreCase = true) || savedProvider.equals("OpenCode", ignoreCase = true)) {
                 savedProvider = "OpenCode.ai"
+            }
+            if (savedProvider.equals("InceptionLabs", ignoreCase = true) || savedProvider.equals("Inception", ignoreCase = true)) {
+                savedProvider = "inceptionlabs.ai"
+            }
+            if (savedProvider.equals("Atria ASI", ignoreCase = true) || savedProvider.equals("Atria", ignoreCase = true)) {
+                savedProvider = "api.atria-asi.ai"
+            }
+            if (savedProvider.equals("Asana AI", ignoreCase = true) || savedProvider.equals("Asana", ignoreCase = true)) {
+                savedProvider = "Ashna AI"
             }
 
             ProviderState(
                 providerName = savedProvider,
                 apiKeys = cleanedKeys,
-                activeModel = sanitizeModelName(rawModel),
-                buildModel = sanitizeBuildModelName(rawBuildModel),
-                currentKeyIndex = json.optInt("currentKeyIndex", 0)
+                activeModel = sanitizeModelName(savedProvider, rawModel),
+                buildModel = sanitizeBuildModelName(savedProvider, rawBuildModel),
+                currentKeyIndex = json.optInt("currentKeyIndex", 0),
+                allowFallbackToOtherProviders = allowFallback
             )
         } catch (e: Exception) {
             ProviderState(
                 providerName = "Gemini",
                 activeModel = "gemini-2.5-flash",
                 buildModel = "gemini-2.5-flash",
-                apiKeys = emptyList()
+                apiKeys = emptyList(),
+                allowFallbackToOtherProviders = true
             )
         }
     }
@@ -91,13 +166,21 @@ object ProviderSettingsManager {
     fun saveState(state: ProviderState) {
         val json = JSONObject().apply {
             put("providerName", state.providerName)
-            put("apiKeys", listToJsonArray(state.apiKeys))
+            val cleanKeys = state.apiKeys
+                .map { it.trim() }
+                .filter { it.isNotBlank() && !it.contains("MY_") }
+            put("apiKeys", listToJsonArray(cleanKeys))
             put("activeModel", state.activeModel)
             put("buildModel", state.buildModel)
             put("currentKeyIndex", state.currentKeyIndex)
+            put("allowFallbackToOtherProviders", state.allowFallbackToOtherProviders)
         }
         prefs?.edit()?.putString(KEY_STATE, json.toString())?.apply()
     }
+
+    fun getActiveProvider(): String = loadState().providerName
+    fun getActiveModel(): String = loadState().activeModel
+    fun getActiveApiKey(): String = loadState().apiKeys.firstOrNull() ?: ""
 
     private fun jsonArrayToList(array: JSONArray?): List<String> {
         val list = mutableListOf<String>()

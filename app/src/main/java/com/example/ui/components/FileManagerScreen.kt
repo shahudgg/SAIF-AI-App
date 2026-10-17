@@ -151,6 +151,32 @@ fun FileManagerScreen(
         reloadFiles()
     }
 
+    val defaultPath = remember(category, project.packageName) {
+        when (category) {
+            FileManagerCategory.JAVA -> {
+                val pkgPath = project.packageName.replace('.', '/').ifBlank { "com/example" }
+                "app/src/main/java/$pkgPath"
+            }
+            FileManagerCategory.RESOURCES -> "app/src/main/res"
+            FileManagerCategory.ASSETS -> "app/src/main/assets"
+            FileManagerCategory.LIB -> "app/libs"
+            FileManagerCategory.JNI -> "app/src/main/jni"
+        }
+    }
+
+    androidx.activity.compose.BackHandler {
+        if (currentRelativePath != defaultPath && currentRelativePath.contains("/")) {
+            val parent = currentRelativePath.substringBeforeLast('/', "")
+            if (parent.isNotBlank()) {
+                currentRelativePath = parent
+            } else {
+                onBack()
+            }
+        } else {
+            onBack()
+        }
+    }
+
     // SAIF AI Liquid Glass Theme Colors
     val bgDark = Color(0xFF070B14)
     val cardBg = Color(0xFF0F172A)

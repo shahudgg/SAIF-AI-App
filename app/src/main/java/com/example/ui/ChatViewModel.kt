@@ -49,6 +49,35 @@ class ChatViewModel(
     private val _isGenerating = MutableStateFlow(false)
     val isGenerating: StateFlow<Boolean> = _isGenerating.asStateFlow()
 
+    private val _pendingOpenVideoProject = MutableStateFlow<com.example.ui.components.VideoProjectData?>(null)
+    val pendingOpenVideoProject: StateFlow<com.example.ui.components.VideoProjectData?> = _pendingOpenVideoProject.asStateFlow()
+
+    fun consumePendingVideoProject() {
+        _pendingOpenVideoProject.value = null
+    }
+
+    fun triggerVideoProjectOpen(project: com.example.ui.components.VideoProjectData) {
+        _pendingOpenVideoProject.value = project
+    }
+
+    private fun isVideoCreationPrompt(prompt: String): Boolean {
+        if (_currentMode.value == "video" || _currentMode.value == "video_project") return true
+        val p = prompt.lowercase().trim()
+        if (p.contains("grow on youtube") || p.contains("how to grow on youtube") || p.contains("grow channel")) return true
+        if (p.contains("promt se video") || p.contains("prompt se video") || p.contains("prompt to video") || p.contains("script to video")) return true
+        val videoKeywords = listOf(
+            "video", "reel", "short", "clip", "movie", "animat", "timeline", "edl",
+            "youtube", "render", "director", "editor", "sfx", "b-roll", "broll", "voiceover"
+        )
+        val actionKeywords = listOf(
+            "bana", "create", "make", "generate", "render", "edit", "chahiye", "ready karo",
+            "karo", "do", "produce", "synthesize", "likho", "write", "bna", "dikhao", "play"
+        )
+        val hasVideo = videoKeywords.any { p.contains(it) }
+        val hasAction = actionKeywords.any { p.contains(it) }
+        return hasVideo && (hasAction || p.split(Regex("\\s+")).size <= 6)
+    }
+
     private val _selectedAttachments = MutableStateFlow<List<Uri>>(emptyList())
     val selectedAttachments: StateFlow<List<Uri>> = _selectedAttachments.asStateFlow()
 
@@ -215,6 +244,30 @@ class ChatViewModel(
         }
     }
 
+    fun createVideoProjectSession(
+        videoProject: com.example.ui.components.VideoProjectData,
+        context: android.content.Context
+    ) {
+        viewModelScope.launch {
+            // Save video project persistently
+            com.example.util.ProjectDataManager.saveVideoProject(context, videoProject)
+
+            val sessionTitle = videoProject.projectName.trim().ifBlank { "Video Project" }
+            val existing = allSessions.value.firstOrNull { it.title.equals(sessionTitle, ignoreCase = true) && (it.mode == "video_project" || it.mode == "project") }
+            if (existing != null) {
+                _activeSessionId.value = existing.id
+            } else {
+                val newSession = repository.createSession(
+                    title = sessionTitle,
+                    mode = "video_project"
+                )
+                _activeSessionId.value = newSession.id
+            }
+            _currentMode.value = "general"
+            _isFilterBookmarked.value = false
+        }
+    }
+
     private fun safeUriToBase64(context: android.content.Context, uri: android.net.Uri, maxDim: Int = 1024): String? {
         return try {
             val boundsOptions = android.graphics.BitmapFactory.Options().apply { inJustDecodeBounds = true }
@@ -323,32 +376,184 @@ class ChatViewModel(
             )
             repository.insertMessage(userMsg)
 
+            // Autonomous AI Video Director Intercept:
+            // When user requests to make/create a video from prompt
+            val isVideoTask = isVideoCreationPrompt(trimmed)
+            if (isVideoTask && base64Images.isEmpty()) {
+                val initialMsg = ChatMessageEntity(
+                    sessionId = sessionId,
+                    role = "model",
+                    content = "🎬 **Autonomous AI Video Director Activated!**\n\nPrompt: *\"$trimmed\"*\n\n⚙️ **Executing 4-Phase Production Pipeline**:\n• 📝 **Phase 1**: High-retention script & scene breakdown (Hook, Problem, Value, CTA)\n• 📦 **Phase 2**: Querying Telegram Master Catalog (`assets_catalog.json`)\n• 🛡️ **Phase 3**: Self-validation & rejection loop\n• ⚡ **Phase 4**: Standalone Python MoviePy/FFmpeg code & animated timeline assembly\n\n⏳ Assembling video project and launching Timeline Studio..."
+                )
+                repository.insertMessage(initialMsg)
+
+                viewModelScope.launch {
+                    try {
+                        val result = com.example.ui.components.SaifAiEditingEngine.generateAutonomousDirectorEdl(
+                            context = context,
+                            prompt = trimmed,
+                            rawVideoUrl = null
+                        )
+                        result.onSuccess { (edl, projectData) ->
+                            createVideoProjectSession(projectData, context)
+                            _pendingOpenVideoProject.value = projectData
+
+                            val scriptSummary = projectData.script?.sections?.joinToString("\n") { sec ->
+                                "• **${sec.kind.uppercase()} (${sec.estSeconds}s)**: \"${sec.narration}\" _(${sec.visualHint})_"
+                            } ?: "• Hook: Viral opening\n• Intro: Problem thesis\n• Value: Solution breakdown\n• Outro: Engagement CTA"
+
+                            val assetsSummary = edl.timeline.take(5).joinToString("\n") { item ->
+                                "• `${item.layerType}`: **${item.assetId}** _(${item.validationLogic})_"
+                            }
+
+                            val successContent = """
+🎬 **Video Project Synthesized Successfully!**
+
+**Title**: ${projectData.projectName}
+**Total Duration**: ${projectData.totalDurationSeconds}s | **Format**: 9:16 Vertical Reel/Short
+**Telegram Assets**: ${edl.projectMeta.totalAssetsUsed} matched from Master Catalog
+
+📝 **High-Retention Script**:
+$scriptSummary
+
+📦 **Telegram Assets Retrieved**:
+$assetsSummary
+
+⚡ **Timeline Studio Ready**:
+The video timeline has been assembled with multi-track clips, audio BGM, sound effects, subtitles, and animation keyframes. Opening Timeline Studio now!
+                            """.trimIndent()
+
+                            repository.insertMessage(
+                                ChatMessageEntity(
+                                    sessionId = sessionId,
+                                    role = "model",
+                                    content = successContent
+                                )
+                            )
+                        }.onFailure { err ->
+                            repository.insertMessage(
+                                ChatMessageEntity(
+                                    sessionId = sessionId,
+                                    role = "model",
+                                    content = "⚠️ Video generation error: ${err.message}. Please check API key in Settings."
+                                )
+                            )
+                        }
+                    } catch (e: Exception) {
+                        e.printStackTrace()
+                    } finally {
+                        _isGenerating.value = false
+                    }
+                }
+                return@launch
+            }
+
+            // 1. Direct Autonomous Device Task Intercept:
+            // Prevents generic LLM refusal messages from leaking onto the user's screen!
+            val isAutonomous = com.example.util.AutonomousScreenAgent.isAutonomousDeviceTask(trimmed)
+            if (isAutonomous && base64Images.isEmpty()) {
+                val cleanConfirmation = when {
+                    trimmed.contains("whatsapp", ignoreCase = true) || trimmed.contains("watsapp", ignoreCase = true) -> {
+                        val contactMatch = Regex("""(?i)\b([a-zA-Z0-9_\u0900-\u097F]+)\s*ko\b""").find(trimmed)
+                        val rec = contactMatch?.groupValues?.get(1)?.trim() ?: ""
+                        if (rec.isNotBlank() && rec != "kisi" && rec != "kisi ko" && rec.lowercase() != "whatsapp" && rec.lowercase() != "watsapp") {
+                            "Ji sir, WhatsApp khol kar $rec ko message send kar raha hoon."
+                        } else {
+                            "Ji sir, WhatsApp par message bhej raha hoon."
+                        }
+                    }
+                    trimmed.contains("youtube", ignoreCase = true) -> {
+                        "Ji sir, YouTube par video search karke pehli video play kar raha hoon."
+                    }
+                    trimmed.contains("call", ignoreCase = true) -> {
+                        "Ji sir, call mila raha hoon."
+                    }
+                    trimmed.contains("scroll", ignoreCase = true) -> {
+                        "Screen scroll kar raha hoon sir."
+                    }
+                    trimmed.contains("home", ignoreCase = true) -> {
+                        "Home screen par jaa rahe hain sir."
+                    }
+                    trimmed.contains("back", ignoreCase = true) -> {
+                        "Back kar diya hai sir."
+                    }
+                    else -> "Ji sir, phone par task execute kar raha hoon."
+                }
+
+                val aiMsg = ChatMessageEntity(
+                    sessionId = sessionId,
+                    role = "model",
+                    content = cleanConfirmation
+                )
+                repository.insertMessage(aiMsg)
+
+                viewModelScope.launch {
+                    val plan = com.example.util.AutonomousScreenAgent.planTask(context, trimmed)
+                    if (plan.steps.isNotEmpty()) {
+                        com.example.util.AutonomousScreenAgent.executeTaskPlan(context, plan)
+                    }
+                }
+
+                _isGenerating.value = false
+                return@launch
+            }
+
+            // 2. Live Screen Context Injection (when user asks about active screen)
+            val service = com.example.util.SaifAccessibilityService.instance
+            val isScreenQuery = trimmed.contains("screen", ignoreCase = true) ||
+                    trimmed.contains("kya dikh raha", ignoreCase = true) ||
+                    trimmed.contains("kya chal raha", ignoreCase = true)
+            val screenContextInfo = if (isScreenQuery && service != null) {
+                val app = service.getCurrentAppLabel(context)
+                val hier = service.inspectScreenHierarchy().take(2200)
+                "\n\n[LIVE SCREEN ACCESS: Active App is '$app'. Visible elements:\n$hier]"
+            } else ""
+
+            val promptToSend = effectivePrompt + screenContextInfo
+
             try {
             // Stream AI Response
             val accumulated = StringBuilder()
             val result = com.example.data.remote.AIApiUtility.executeWithFallback(
-                prompt = effectivePrompt,
+                prompt = promptToSend,
                 mode = _currentMode.value,
                 history = existing,
                 customSystemPrompt = _customSystemPrompt.value,
                 base64Images = base64Images
             ) { chunk ->
                 accumulated.append(chunk)
-                _currentStreamingContent.value = accumulated.toString()
+                val rawSoFar = accumulated.toString()
+                val preview = com.example.data.remote.AIApiUtility.sanitizeAiReply(rawSoFar, isStreaming = true)
+                _currentStreamingContent.value = preview
             }
 
-            val rawContent = if (accumulated.isNotEmpty()) {
-                accumulated.toString()
+            val rawContent = if (result.isSuccess) {
+                val successfulText = result.getOrNull().orEmpty().ifBlank { accumulated.toString() }
+                com.example.data.remote.AIApiUtility.sanitizeAiReply(successfulText, isStreaming = false)
+            } else if (accumulated.isNotBlank()) {
+                val cleaned = com.example.data.remote.AIApiUtility.sanitizeAiReply(accumulated.toString(), isStreaming = false)
+                if (cleaned.isNotBlank() && !cleaned.equals("Thinking...", true)) {
+                    cleaned
+                } else {
+                    val err = result.exceptionOrNull()
+                    val errMsg = err?.message ?: "AI provider did not return any content."
+                    "❌ **API Error:** $errMsg\n\n*Please verify your API key, model selection, or internet connection in Settings (⚙️).*"
+                }
             } else {
                 val err = result.exceptionOrNull()
                 val errMsg = err?.message ?: "AI provider did not return any content."
                 "❌ **API Error:** $errMsg\n\n*Please verify your API key, model selection, or internet connection in Settings (⚙️).*"
             }
 
-            val isAutonomous = com.example.util.AutonomousScreenAgent.isAutonomousDeviceTask(trimmed)
-            val parsed = com.example.util.DeviceActionParser.parse(rawContent, trimmed)
-            val finalContent = parsed.cleanSpokenText.ifBlank {
-                if (isAutonomous || parsed.actions.isNotEmpty()) "Theek hai, sabhi tasks execute kar diye gaye hain." else rawContent
+            val hasApiError = rawContent.startsWith("❌ **API Error:**")
+            val isAutonomous = !hasApiError && com.example.util.AutonomousScreenAgent.isAutonomousDeviceTask(trimmed)
+            val parsed = if (hasApiError) null else com.example.util.DeviceActionParser.parse(rawContent, trimmed)
+            val finalContent = if (hasApiError) {
+                rawContent
+            } else {
+                parsed?.cleanSpokenText?.ifBlank {
+                    if (isAutonomous || (parsed.actions.isNotEmpty())) "Theek hai, sabhi tasks execute kar diye gaye hain." else rawContent
+                } ?: rawContent
             }
 
             if (isAutonomous) {
@@ -358,7 +563,7 @@ class ChatViewModel(
                         com.example.util.AutonomousScreenAgent.executeTaskPlan(context, plan)
                     }
                 }
-            } else if (parsed.actions.isNotEmpty()) {
+            } else if (parsed != null && parsed.actions.isNotEmpty()) {
                 viewModelScope.launch {
                     com.example.util.DeviceActionManager.executeActionsSequentially(context, parsed.actions)
                 }
@@ -425,8 +630,23 @@ class ChatViewModel(
         }
     }
 
-    fun renameSession(sessionId: String, newTitle: String) {
+    fun renameSession(sessionId: String, newTitle: String, context: android.content.Context? = null) {
         viewModelScope.launch {
+            val target = allSessions.value.firstOrNull { it.id == sessionId }
+            if (target != null && context != null) {
+                if (target.mode == "video_project" || com.example.util.ProjectDataManager.hasVideoProject(context, target.title)) {
+                    val oldProj = com.example.util.ProjectDataManager.getVideoProject(context, target.title)
+                    if (oldProj != null) {
+                        com.example.util.ProjectDataManager.deleteVideoProject(context, target.title)
+                        com.example.util.ProjectDataManager.saveVideoProject(context, oldProj.copy(projectName = newTitle.trim()))
+                    }
+                } else if (target.mode == "project" || com.example.util.ProjectDataManager.hasProject(context, target.title)) {
+                    val oldProj = com.example.util.ProjectDataManager.getProject(context, target.title)
+                    if (oldProj != null) {
+                        com.example.util.ProjectDataManager.renameProject(context, target.title, newTitle.trim(), oldProj.copy(appName = newTitle.trim()))
+                    }
+                }
+            }
             repository.updateSessionTitle(sessionId, newTitle)
         }
     }
@@ -434,9 +654,13 @@ class ChatViewModel(
     fun deleteSession(sessionId: String, context: android.content.Context? = null) {
         viewModelScope.launch {
             val target = allSessions.value.firstOrNull { it.id == sessionId }
-            if (target != null && context != null && (target.mode == "project" || com.example.util.ProjectDataManager.hasProject(context, target.title))) {
-                com.example.util.ProjectDataManager.deleteProject(context, target.title)
-                com.example.util.ProjectChatHistoryManager.clearMessages(context, target.title)
+            if (target != null && context != null) {
+                if (target.mode == "project" || com.example.util.ProjectDataManager.hasProject(context, target.title)) {
+                    com.example.util.ProjectDataManager.deleteProject(context, target.title)
+                    com.example.util.ProjectChatHistoryManager.clearMessages(context, target.title)
+                } else if (target.mode == "video_project" || com.example.util.ProjectDataManager.hasVideoProject(context, target.title)) {
+                    com.example.util.ProjectDataManager.deleteVideoProject(context, target.title)
+                }
             }
             repository.deleteSession(sessionId)
             if (_activeSessionId.value == sessionId) {

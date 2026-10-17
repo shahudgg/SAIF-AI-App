@@ -7,6 +7,7 @@ import com.example.agent.PlaybookStore
 import com.example.agent.RateGovernor
 import com.example.agent.ScreenSnapshot
 import com.example.agent.StepRecord
+import com.example.data.local.ProviderSettingsManager
 import com.example.data.remote.GeminiKeyPool
 import com.example.data.remote.ModelResolver
 import com.example.data.remote.ModelRole
@@ -46,7 +47,9 @@ object ComputerUseBrain : AgentBrain {
     ): BrainDecision = withContext(Dispatchers.IO) {
         RateGovernor.acquire()
 
-        val key = GeminiKeyPool.getNextKey()
+        val state = ProviderSettingsManager.loadState()
+        val isGemini = state.providerName.equals("Gemini", ignoreCase = true)
+        val key = if (isGemini) GeminiKeyPool.getNextKey() else null
         if (key.isNullOrBlank()) {
             return@withContext FunctionCallingBrain.decide(task, sessionCtx, notes, history, snapshot, thinkingLevel)
         }
@@ -136,7 +139,7 @@ object ComputerUseBrain : AgentBrain {
             }
 
             val json = JSONObject(bodyString)
-            previousInteractionId = json.optString("interaction_id", null)
+            previousInteractionId = if (json.has("interaction_id")) json.optString("interaction_id").ifBlank { null } else null
 
             val steps = json.optJSONArray("steps")
             val calls = mutableListOf<AgentCall>()

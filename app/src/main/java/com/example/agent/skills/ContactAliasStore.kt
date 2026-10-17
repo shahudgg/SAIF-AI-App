@@ -70,6 +70,28 @@ object ContactAliasStore {
         return results
     }
 
+    fun getSampleContactNames(context: Context): List<String> {
+        val names = mutableListOf<String>()
+        try {
+            val contentResolver = context.contentResolver
+            val uri = ContactsContract.CommonDataKinds.Phone.CONTENT_URI
+            val projection = arrayOf(ContactsContract.CommonDataKinds.Phone.DISPLAY_NAME)
+            val cursor = contentResolver.query(uri, projection, null, null, null)
+            cursor?.use { c ->
+                val nameIdx = c.getColumnIndex(ContactsContract.CommonDataKinds.Phone.DISPLAY_NAME)
+                while (c.moveToNext() && names.size < 25) {
+                    val name = if (nameIdx >= 0) c.getString(nameIdx) ?: "" else ""
+                    if (name.isNotBlank() && !names.contains(name)) {
+                        names.add(name)
+                    }
+                }
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "Failed reading contact names for STT bias: ${e.message}")
+        }
+        return names
+    }
+
     fun normalizePhoneNumber(raw: String, defaultCountryCode: String = "+91"): String {
         var digits = raw.replace(Regex("[^0-9+]"), "")
         if (digits.startsWith("+")) return digits

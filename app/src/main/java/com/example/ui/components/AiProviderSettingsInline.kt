@@ -32,12 +32,14 @@ import androidx.compose.ui.unit.sp
 import com.example.data.local.ProviderSettingsManager
 import com.example.data.local.ProviderState
 import com.example.data.remote.AIApiUtility
+import com.example.llm.ProviderProfile
 import com.example.ui.theme.PrimaryAccent
 import com.example.ui.theme.SaifTheme
 import kotlinx.coroutines.launch
 
 val PROVIDERS = listOf(
     "Gemini",
+    "Ashna AI",
     "OpenCode.ai",
     "OpenRouter",
     "Groq",
@@ -49,12 +51,13 @@ val PROVIDERS = listOf(
     "xAI",
     "Cerebras",
     "Perplexity",
-    "InceptionLabs",
-    "Atria ASI"
+    "inceptionlabs.ai",
+    "api.atria-asi.ai"
 )
 
 fun getProviderApiKeyUrl(provider: String): String {
     return when {
+        provider.contains("Ashna", ignoreCase = true) -> "https://app.ashna.ai/integrations?tab=api"
         provider.contains("Gemini", ignoreCase = true) -> "https://aistudio.google.com/app/apikey"
         provider.contains("OpenCode", ignoreCase = true) -> "https://opencode.ai"
         provider.contains("OpenRouter", ignoreCase = true) -> "https://openrouter.ai/keys"
@@ -67,8 +70,8 @@ fun getProviderApiKeyUrl(provider: String): String {
         provider.contains("xAI", ignoreCase = true) -> "https://console.x.ai"
         provider.contains("Cerebras", ignoreCase = true) -> "https://cloud.cerebras.ai"
         provider.contains("Perplexity", ignoreCase = true) -> "https://www.perplexity.ai/settings/api"
-        provider.contains("Inception", ignoreCase = true) -> "https://inceptionlabs.ai"
-        provider.contains("Atria", ignoreCase = true) -> "https://atria.ai"
+        provider.contains("inception", ignoreCase = true) -> "https://inceptionlabs.ai"
+        provider.contains("atria", ignoreCase = true) -> "https://api.atria-asi.ai"
         else -> "https://aistudio.google.com/app/apikey"
     }
 }
@@ -88,6 +91,7 @@ fun AiProviderSettingsInline() {
             when {
                 state.providerName.equals("OpenCode Zen", ignoreCase = true) -> "OpenCode.ai"
                 state.providerName.contains("OpenCode", ignoreCase = true) -> "OpenCode.ai"
+                state.providerName.contains("Asana", ignoreCase = true) || state.providerName.contains("Ashna", ignoreCase = true) -> "Ashna AI"
                 PROVIDERS.contains(state.providerName) -> state.providerName
                 else -> "Gemini"
             }
@@ -95,8 +99,10 @@ fun AiProviderSettingsInline() {
     }
     
     var apiKeys by remember { mutableStateOf(if (state.apiKeys.isEmpty()) listOf("") else state.apiKeys) }
-    var activeModel by remember { mutableStateOf(state.activeModel) }
-    var buildModel by remember { mutableStateOf(state.buildModel.ifBlank { "gemini-2.5-pro" }) }
+    var activeModel by remember { mutableStateOf(state.activeModel.ifBlank { "gemini-2.0-flash" }) }
+    var buildModel by remember { mutableStateOf(state.buildModel.ifBlank { "gemini-2.0-flash" }) }
+    var allowFallbackToOtherProviders by remember { mutableStateOf(state.allowFallbackToOtherProviders) }
+    var connectionDiagnostics by remember { mutableStateOf<com.example.llm.ConnectionTestResult?>(null) }
     
     var fetchedModels by remember { mutableStateOf<List<Pair<String, Boolean>>>(emptyList()) }
     var isFetching by remember { mutableStateOf(false) }
@@ -210,23 +216,35 @@ fun AiProviderSettingsInline() {
                                 expanded = false
                                 
                                 // Auto-update activeModel to a sensible default for the new provider
-                                activeModel = when (pName) {
-                                    "DeepSeek" -> "deepseek-chat"
-                                    "Anthropic" -> "claude-3-5-sonnet-20241022"
-                                    "Mistral" -> "mistral-large-latest"
-                                    "Together" -> "meta-llama/Llama-3.3-70B-Instruct-Turbo"
-                                    "xAI" -> "grok-2-latest"
-                                    "Cerebras" -> "llama-3.3-70b"
-                                    "Perplexity" -> "sonar"
-                                    "InceptionLabs" -> "merlin-32k"
-                                    "Atria ASI" -> "atria-1"
-                                    "OpenCode.ai" -> "glm-5.1"
-                                    "OpenRouter" -> "meta-llama/llama-3.1-8b-instruct:free"
-                                    "Groq" -> "llama-3.3-70b-versatile"
-                                    "OpenAI" -> "gpt-4o-mini"
-                                    "Gemini" -> "gemini-2.5-flash"
-                                    else -> "glm-5.1"
-                                } 
+                                val newDefault = when {
+                                    pName.contains("Ashna", ignoreCase = true) -> "ashna-x1"
+                                    pName.contains("DeepSeek", ignoreCase = true) -> "deepseek-chat"
+                                    pName.contains("Anthropic", ignoreCase = true) -> "claude-3-5-sonnet-20241022"
+                                    pName.contains("Mistral", ignoreCase = true) -> "mistral-large-latest"
+                                    pName.contains("Together", ignoreCase = true) -> "meta-llama/Llama-3.3-70B-Instruct-Turbo"
+                                    pName.contains("xAI", ignoreCase = true) -> "grok-2-latest"
+                                    pName.contains("Cerebras", ignoreCase = true) -> "llama-3.3-70b"
+                                    pName.contains("Perplexity", ignoreCase = true) -> "sonar"
+                                    pName.contains("inception", ignoreCase = true) -> "mercury-2.5"
+                                    pName.contains("atria", ignoreCase = true) -> "Atria-Dawn-Preview"
+                                    pName.contains("OpenCode", ignoreCase = true) -> "glm-5.1"
+                                    pName.contains("OpenRouter", ignoreCase = true) -> "meta-llama/llama-3.1-8b-instruct:free"
+                                    pName.contains("Groq", ignoreCase = true) -> "llama-3.3-70b-versatile"
+                                    pName.contains("OpenAI", ignoreCase = true) -> "gpt-4o-mini"
+                                    pName.contains("Gemini", ignoreCase = true) -> "gemini-2.0-flash"
+                                    else -> "mercury-2.5"
+                                }
+                                activeModel = newDefault
+                                buildModel = newDefault
+                                val cleanedList = apiKeys.map { AIApiUtility.sanitizeKey(it) }.filter { it.isNotBlank() }
+                                ProviderSettingsManager.saveState(ProviderState(
+                                    providerName = pName,
+                                    apiKeys = cleanedList,
+                                    activeModel = newDefault,
+                                    buildModel = newDefault,
+                                    currentKeyIndex = 0,
+                                    allowFallbackToOtherProviders = allowFallbackToOtherProviders
+                                ))
                             }
                         )
                     }
@@ -292,40 +310,43 @@ fun AiProviderSettingsInline() {
                             fetchError = null
                             saveSuccessMessage = null
 
-                            // Auto-detect provider from key prefix if unmistakable
-                            val autoProv = when {
-                                cleanKey.startsWith("AIza") || cleanKey.startsWith("AQ.") -> "Gemini"
-                                cleanKey.startsWith("gsk_") -> "Groq"
-                                cleanKey.startsWith("sk-or-") -> "OpenRouter"
-                                cleanKey.startsWith("sk-ant-") -> "Anthropic"
-                                cleanKey.startsWith("opencode", ignoreCase = true) || cleanKey.startsWith("oc-") -> "OpenCode.ai"
-                                cleanKey.startsWith("sk-proj-") || cleanKey.startsWith("sk-admin-") -> "OpenAI"
-                                cleanKey.startsWith("xai-") -> "xAI"
-                                cleanKey.startsWith("mistral-") -> "Mistral"
-                                cleanKey.startsWith("together-") -> "Together"
-                                cleanKey.startsWith("pplx-") -> "Perplexity"
-                                cleanKey.startsWith("csk-") -> "Cerebras"
-                                cleanKey.startsWith("fw_") || cleanKey.startsWith("fwi_") -> "Fireworks"
-                                else -> null
-                            }
-                            if (autoProv != null && autoProv != providerName) {
+                            // Auto-detect provider from key prefix if unmistakable vendor prefix
+                            val detectedProfile = ProviderProfile.detectProviderFromKey(cleanKey, providerName)
+                            val autoProv = if (detectedProfile.displayName.equals("Google Gemini", true)) "Gemini" else detectedProfile.displayName
+                            val shouldAutoSwitch = autoProv.isNotBlank() && !autoProv.equals(providerName, ignoreCase = true) &&
+                                (cleanKey.startsWith("AIza") || cleanKey.startsWith("AQ.") || cleanKey.startsWith("gsk_") ||
+                                 cleanKey.startsWith("sk-or-") || cleanKey.startsWith("sk-ant-") || cleanKey.startsWith("sk-proj-") ||
+                                 cleanKey.startsWith("xai-") || cleanKey.startsWith("csk-") || cleanKey.startsWith("pplx-") ||
+                                 cleanKey.startsWith("together-") || cleanKey.startsWith("mistral-") || cleanKey.startsWith("opencode") ||
+                                 cleanKey.startsWith("oc-") || cleanKey.startsWith("ashna") || cleanKey.startsWith("atria") ||
+                                 cleanKey.startsWith("inception") || cleanKey.startsWith("fw_"))
+
+                            if (shouldAutoSwitch) {
                                 providerName = autoProv
-                                activeModel = when (autoProv) {
-                                    "Gemini" -> "gemini-2.5-flash"
-                                    "Groq" -> "llama-3.3-70b-versatile"
-                                    "OpenRouter" -> "google/gemini-2.0-flash-001"
-                                    "OpenCode.ai" -> "glm-5.1"
-                                    "OpenAI" -> "gpt-4o-mini"
-                                    "Anthropic" -> "claude-3-5-sonnet-20241022"
-                                    "xAI" -> "grok-2-latest"
-                                    "Mistral" -> "mistral-large-latest"
-                                    "Together" -> "meta-llama/Llama-3.3-70B-Instruct-Turbo"
-                                    "Perplexity" -> "sonar"
-                                    "Cerebras" -> "llama-3.3-70b"
-                                    "Fireworks" -> "accounts/fireworks/models/llama-v3p3-70b-instruct"
-                                    else -> activeModel
+                                activeModel = detectedProfile.defaultFallbackModels.firstOrNull() ?: activeModel
+                            }
+
+                            // Align activeModel to provider default if currently holding unrelated Gemini default
+                            if (!providerName.equals("Gemini", ignoreCase = true) && activeModel.contains("gemini", ignoreCase = true)) {
+                                activeModel = detectedProfile.defaultFallbackModels.firstOrNull() ?: when {
+                                    providerName.contains("Ashna", ignoreCase = true) -> "ashna-x1"
+                                    providerName.contains("Groq", ignoreCase = true) -> "llama-3.3-70b-versatile"
+                                    providerName.contains("DeepSeek", ignoreCase = true) -> "deepseek-chat"
+                                    providerName.contains("OpenAI", ignoreCase = true) -> "gpt-4o-mini"
+                                    else -> "ashna-x1"
                                 }
                             }
+
+                            // Instantly auto-save so user never loses their key upon leaving settings
+                            val cleanedList = updated.map { AIApiUtility.sanitizeKey(it) }.filter { it.isNotBlank() }
+                            ProviderSettingsManager.saveState(ProviderState(
+                                providerName = providerName,
+                                apiKeys = cleanedList,
+                                activeModel = activeModel.ifBlank { "gemini-2.0-flash" },
+                                buildModel = buildModel.ifBlank { activeModel.ifBlank { "gemini-2.0-flash" } },
+                                currentKeyIndex = 0,
+                                allowFallbackToOtherProviders = allowFallbackToOtherProviders
+                            ))
                         },
                         placeholder = { 
                             Text(
@@ -394,10 +415,40 @@ fun AiProviderSettingsInline() {
                         try {
                             val result = AIApiUtility.fetchModels(providerName, keyToUse)
                             fetchedModels = result
+
+                            // Pick a verified, current model for latency & capability probe
+                            val probeModel = when {
+                                providerName.equals("Gemini", true) -> "gemini-2.0-flash"
+                                providerName.equals("Groq", true) -> "llama-3.3-70b-versatile"
+                                providerName.equals("OpenAI", true) -> "gpt-4o-mini"
+                                providerName.equals("DeepSeek", true) -> "deepseek-chat"
+                                providerName.equals("Anthropic", true) -> "claude-3-5-sonnet-20241022"
+                                providerName.contains("Ashna", true) || providerName.contains("Asana", true) -> "ashna-x1"
+                                else -> if (result.isNotEmpty()) {
+                                    result.firstOrNull { it.first == activeModel }?.first
+                                        ?: result.firstOrNull { it.second }?.first
+                                        ?: result.first().first
+                                } else activeModel.ifBlank { "default" }
+                            }
+                            val testRes = com.example.llm.LlmClient.testConnection(providerName, keyToUse, probeModel)
+                            connectionDiagnostics = testRes
+
                             if (result.isEmpty()) {
-                                fetchError = "No models found or connection failed. Please check your API key."
+                                val errDetail = if (!testRes.success && testRes.error != null) {
+                                    testRes.error.formatHumanMessage()
+                                } else {
+                                    "No models found. Please check your API key."
+                                }
+                                fetchError = "❌ Invalid API Key for $providerName: $errDetail"
+                                fetchedModels = emptyList()
+                                fetchSuccessMessage = null
                             } else {
-                                fetchSuccessMessage = "✓ Connection successful! ${result.size} models loaded."
+                                fetchSuccessMessage = if (testRes.success) {
+                                    "✓ Connected to $providerName! (${testRes.latencyMs}ms latency • ${result.size} models loaded)"
+                                } else {
+                                    "✓ Connected to $providerName! (${result.size} models loaded)"
+                                }
+                                fetchError = null
                                 
                                 // Auto-select activeModel if current is empty or not in fetched list
                                 if (activeModel.isBlank() || fetchedModels.none { it.first.equals(activeModel, ignoreCase = true) }) {
@@ -406,23 +457,60 @@ fun AiProviderSettingsInline() {
                                             ?: fetchedModels.firstOrNull { it.first == "deepseek-v4-flash" }?.first
                                             ?: fetchedModels.firstOrNull { it.second }?.first
                                             ?: fetchedModels.first().first
+                                    } else if (providerName.contains("Ashna", ignoreCase = true)) {
+                                        fetchedModels.firstOrNull { it.first.contains(activeModel, ignoreCase = true) || (activeModel.isNotBlank() && activeModel.contains(it.first, ignoreCase = true)) }?.first
+                                            ?: (if (activeModel.contains("deepseek", ignoreCase = true)) fetchedModels.firstOrNull { it.first.contains("deepseek", ignoreCase = true) }?.first else null)
+                                            ?: fetchedModels.firstOrNull { it.first.equals("deepseek-v4.1-flash", ignoreCase = true) }?.first
+                                            ?: fetchedModels.firstOrNull { it.first.equals("ashna-x1", ignoreCase = true) }?.first
+                                            ?: fetchedModels.firstOrNull { it.first.contains("ashna-x1", ignoreCase = true) }?.first
+                                            ?: fetchedModels.firstOrNull { it.second }?.first
+                                            ?: fetchedModels.first().first
+                                    } else if (providerName.contains("inception", ignoreCase = true)) {
+                                        fetchedModels.firstOrNull { it.first.equals("mercury-2.5", ignoreCase = true) }?.first
+                                            ?: fetchedModels.firstOrNull { it.first.contains("mercury", ignoreCase = true) }?.first
+                                            ?: fetchedModels.firstOrNull { it.second }?.first
+                                            ?: fetchedModels.first().first
+                                    } else if (providerName.contains("atria", ignoreCase = true)) {
+                                        fetchedModels.firstOrNull { it.first.equals("Atria-Dawn-Preview", ignoreCase = true) }?.first
+                                            ?: fetchedModels.firstOrNull { it.first.contains("dawn", ignoreCase = true) }?.first
+                                            ?: fetchedModels.firstOrNull { it.second }?.first
+                                            ?: fetchedModels.first().first
                                     } else {
-                                        fetchedModels.first().first
+                                        fetchedModels.firstOrNull { it.second }?.first ?: fetchedModels.first().first
                                     }
                                     activeModel = defaultModel
                                 }
+                                
+                                // Auto-save the valid keys, model, and fallback switch
+                                val cleanedKeys = apiKeys.map { AIApiUtility.sanitizeKey(it) }.filter { it.isNotBlank() }
+                                ProviderSettingsManager.saveState(ProviderState(
+                                    providerName = providerName,
+                                    apiKeys = cleanedKeys,
+                                    activeModel = activeModel,
+                                    buildModel = activeModel,
+                                    currentKeyIndex = 0,
+                                    allowFallbackToOtherProviders = allowFallbackToOtherProviders
+                                ))
                             }
-                            
-                            // Auto-save the valid keys and model
+                        } catch (e: Exception) {
+                            fetchError = "❌ ${e.message ?: "Connection failed"}"
+                            fetchSuccessMessage = null
+                            val fallbackList = ProviderProfile.getById(providerName).defaultFallbackModels.map { Pair(it, true) }
+                            if (fallbackList.isNotEmpty()) {
+                                fetchedModels = fallbackList
+                                if (activeModel.isBlank() || fetchedModels.none { it.first.equals(activeModel, ignoreCase = true) }) {
+                                    activeModel = fallbackList.first().first
+                                }
+                            }
                             val cleanedKeys = apiKeys.map { AIApiUtility.sanitizeKey(it) }.filter { it.isNotBlank() }
                             ProviderSettingsManager.saveState(ProviderState(
                                 providerName = providerName,
                                 apiKeys = cleanedKeys,
                                 activeModel = activeModel,
-                                currentKeyIndex = 0
+                                buildModel = activeModel,
+                                currentKeyIndex = 0,
+                                allowFallbackToOtherProviders = allowFallbackToOtherProviders
                             ))
-                        } catch (e: Exception) {
-                            fetchError = "Connection failed: ${e.message}"
                         } finally {
                             isFetching = false
                         }
@@ -458,6 +546,26 @@ fun AiProviderSettingsInline() {
         }
         if (fetchError != null) {
             Text(fetchError!!, color = Color.Red, fontSize = 12.sp)
+        }
+
+        if (connectionDiagnostics != null && connectionDiagnostics!!.success) {
+            Surface(
+                shape = RoundedCornerShape(8.dp),
+                color = Color(0xFF0F172A),
+                border = BorderStroke(1.dp, Color(0xFF10B981).copy(alpha = 0.5f)),
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                    Row(horizontalArrangement = Arrangement.SpaceBetween, modifier = Modifier.fillMaxWidth()) {
+                        Text("⚡ Latency: ${connectionDiagnostics!!.latencyMs}ms", color = Color(0xFF10B981), fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                        Text("Target: ${connectionDiagnostics!!.model}", color = Color(0xFF94A3B8), fontSize = 11.sp)
+                    }
+                    val limits = connectionDiagnostics!!.learnedLimits
+                    if (limits != null) {
+                        Text("Context: ${limits.contextWindowTokens / 1000}k tokens • Max Output: ${limits.maxOutputTokens} tokens", color = Color(0xFFCBD5E1), fontSize = 11.sp)
+                    }
+                }
+            }
         }
 
         // Display fetched models ONLY after user enters key and fetches models
@@ -499,15 +607,21 @@ fun AiProviderSettingsInline() {
                             onClick = {
                                 activeModel = name
                                 buildModel = name
+                                fetchError = null
                                 val cleanedKeys = apiKeys.map { it.trim() }.filter { it.isNotBlank() }
                                 ProviderSettingsManager.saveState(ProviderState(
                                     providerName = providerName,
                                     apiKeys = cleanedKeys,
                                     activeModel = name,
                                     buildModel = name,
-                                    currentKeyIndex = 0
+                                    currentKeyIndex = 0,
+                                    allowFallbackToOtherProviders = allowFallbackToOtherProviders
                                 ))
-                                saveSuccessMessage = "✓ Model selected: '$name'"
+                                saveSuccessMessage = if (providerName.contains("Ashna", true) && (name.contains("astra", true) || name.contains("gpt-6", true) || name.contains("claude", true))) {
+                                    "✓ Model: '$name' (Tip: Requires paid credits on Ashna. Use 'ashna-x1' for free trial)"
+                                } else {
+                                    "✓ Model selected: '$name'"
+                                }
                             },
                             shape = RoundedCornerShape(8.dp),
                             color = if (isSelected) Color(0xFF10B981).copy(alpha = 0.22f) else SaifTheme.colors.surfaceCard,
@@ -609,18 +723,67 @@ fun AiProviderSettingsInline() {
             Text(saveSuccessMessage!!, color = Color(0xFF10B981), fontSize = 12.sp, fontWeight = FontWeight.Medium)
         }
 
+        // Fallback policy switch
+        Surface(
+            shape = RoundedCornerShape(10.dp),
+            color = SaifTheme.colors.surfaceCard,
+            border = BorderStroke(1.dp, SaifTheme.colors.textSecondary.copy(alpha = 0.2f)),
+            modifier = Modifier.fillMaxWidth()
+        ) {
+            Row(
+                modifier = Modifier.padding(14.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween
+            ) {
+                Column(modifier = Modifier.weight(1f).padding(end = 12.dp)) {
+                    Text(
+                        text = "Allow fallback to other providers",
+                        color = SaifTheme.colors.textPrimary,
+                        fontSize = 13.5.sp,
+                        fontWeight = FontWeight.SemiBold
+                    )
+                    Spacer(modifier = Modifier.height(2.dp))
+                    Text(
+                        text = "When OFF (default), SAIF AI strictly uses your selected provider and never silently switches to platform keys.",
+                        color = SaifTheme.colors.textSecondary,
+                        fontSize = 11.5.sp,
+                        lineHeight = 15.sp
+                    )
+                }
+                Switch(
+                    checked = allowFallbackToOtherProviders,
+                    onCheckedChange = { allowFallbackToOtherProviders = it }
+                )
+            }
+        }
+
         // Save Button
         Button(
             onClick = {
                 val cleanedKeys = apiKeys.map { AIApiUtility.sanitizeKey(it) }.filter { it.isNotBlank() }
+                val firstKey = cleanedKeys.firstOrNull() ?: ""
+                val detected = if (firstKey.isNotBlank()) ProviderProfile.detectProviderFromKey(firstKey, providerName) else null
+                val autoName = detected?.let { if (it.displayName.equals("Google Gemini", true)) "Gemini" else it.displayName }
+                val finalProv = if (autoName != null && (firstKey.startsWith("AIza") || firstKey.startsWith("AQ.") || firstKey.startsWith("gsk_") || firstKey.startsWith("sk-or-") || firstKey.startsWith("sk-ant-") || firstKey.startsWith("sk-proj-"))) {
+                    autoName
+                } else {
+                    providerName
+                }
+                val finalModel = if (activeModel.isBlank() || (!finalProv.equals("Gemini", true) && activeModel.startsWith("gemini-") && !finalProv.contains("Ashna", true))) {
+                    ProviderProfile.getById(finalProv).defaultFallbackModels.firstOrNull() ?: "ashna-x1"
+                } else activeModel
+
+                providerName = finalProv
+                activeModel = finalModel
                 ProviderSettingsManager.saveState(ProviderState(
-                    providerName = providerName,
+                    providerName = finalProv,
                     apiKeys = cleanedKeys,
-                    activeModel = activeModel.trim(),
-                    buildModel = activeModel.trim(),
-                    currentKeyIndex = 0
+                    activeModel = finalModel.trim(),
+                    buildModel = finalModel.trim(),
+                    currentKeyIndex = 0,
+                    allowFallbackToOtherProviders = allowFallbackToOtherProviders
                 ))
-                saveSuccessMessage = "✓ Saved: $providerName ($activeModel) is now active!"
+                saveSuccessMessage = "✓ Saved: $finalProv ($finalModel) is now active!"
             },
             modifier = Modifier.fillMaxWidth().height(48.dp),
             shape = RoundedCornerShape(8.dp),
@@ -700,6 +863,7 @@ fun AiProviderSettingsInline() {
                                     onClick = { 
                                         activeModel = name
                                         buildModel = name
+                                        fetchError = null
                                         showAllModelsDialog = false
                                         
                                         // Auto-save model selection
@@ -709,7 +873,8 @@ fun AiProviderSettingsInline() {
                                             apiKeys = cleanedKeys,
                                             activeModel = name,
                                             buildModel = name,
-                                            currentKeyIndex = 0
+                                            currentKeyIndex = 0,
+                                            allowFallbackToOtherProviders = allowFallbackToOtherProviders
                                         ))
                                         saveSuccessMessage = "✓ Selected '$name' as active model"
                                     },

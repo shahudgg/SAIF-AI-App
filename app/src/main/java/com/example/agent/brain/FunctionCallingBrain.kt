@@ -1,13 +1,15 @@
 package com.example.agent.brain
 
 import android.util.Log
-import com.example.agent.ActionExecutor
+import com.example.agent.ActionNormalizer
 import com.example.agent.AgentCall
 import com.example.agent.AgentOutcome
 import com.example.agent.PlaybookStore
 import com.example.agent.RateGovernor
 import com.example.agent.ScreenSnapshot
 import com.example.agent.StepRecord
+import com.example.agent.ToolSchema
+import com.example.data.local.ProviderSettingsManager
 import com.example.data.remote.GeminiKeyPool
 import com.example.data.remote.ModelResolver
 import com.example.data.remote.ModelRole
@@ -29,167 +31,6 @@ object FunctionCallingBrain : AgentBrain {
         .readTimeout(25, TimeUnit.SECONDS)
         .build()
 
-    private val toolDeclarationsJson = JSONArray().apply {
-        put(JSONObject().apply {
-            put("name", "tap_element")
-            put("description", "Tap a UI element by its index from the latest screen element list (preferred when target is in the list).")
-            put("parameters", JSONObject().apply {
-                put("type", "object")
-                put("properties", JSONObject().apply {
-                    put("index", JSONObject().put("type", "integer").put("description", "Element index from the list"))
-                    put("intent", JSONObject().put("type", "string").put("description", "Why you are tapping this element"))
-                })
-                put("required", JSONArray().put("index"))
-            })
-        })
-        put(JSONObject().apply {
-            put("name", "click")
-            put("description", "Click at normalized (x, y) coordinates (0-999) on the screenshot (for unlabeled icons, thumbnails, canvas).")
-            put("parameters", JSONObject().apply {
-                put("type", "object")
-                put("properties", JSONObject().apply {
-                    put("x", JSONObject().put("type", "integer").put("description", "X coordinate 0-999"))
-                    put("y", JSONObject().put("type", "integer").put("description", "Y coordinate 0-999"))
-                    put("intent", JSONObject().put("type", "string").put("description", "Purpose of the click"))
-                })
-                put("required", JSONArray().put("x").put("y"))
-            })
-        })
-        put(JSONObject().apply {
-            put("name", "type_into")
-            put("description", "Type text into a focused or targeted input field.")
-            put("parameters", JSONObject().apply {
-                put("type", "object")
-                put("properties", JSONObject().apply {
-                    put("index", JSONObject().put("type", "integer").put("description", "Optional input field element index"))
-                    put("text", JSONObject().put("type", "string").put("description", "Text to type"))
-                    put("clear_first", JSONObject().put("type", "boolean").put("description", "Clear existing text first"))
-                    put("press_enter", JSONObject().put("type", "boolean").put("description", "Press search/enter key on keyboard after typing"))
-                    put("intent", JSONObject().put("type", "string").put("description", "Purpose of typing"))
-                })
-                put("required", JSONArray().put("text"))
-            })
-        })
-        put(JSONObject().apply {
-            put("name", "swipe")
-            put("description", "Perform a human-like finger swipe across the screen (up = next Reel/Short or scroll further down).")
-            put("parameters", JSONObject().apply {
-                put("type", "object")
-                put("properties", JSONObject().apply {
-                    put("direction", JSONObject().put("type", "string").put("enum", JSONArray().put("up").put("down").put("left").put("right")))
-                    put("distance", JSONObject().put("type", "string").put("enum", JSONArray().put("short").put("medium").put("long")))
-                    put("intent", JSONObject().put("type", "string").put("description", "Reason for swipe"))
-                })
-                put("required", JSONArray().put("direction"))
-            })
-        })
-        put(JSONObject().apply {
-            put("name", "scroll_until")
-            put("description", "Scroll in a direction until text appears on screen.")
-            put("parameters", JSONObject().apply {
-                put("type", "object")
-                put("properties", JSONObject().apply {
-                    put("text", JSONObject().put("type", "string").put("description", "Text to find"))
-                    put("direction", JSONObject().put("type", "string").put("enum", JSONArray().put("down").put("up")))
-                    put("max_swipes", JSONObject().put("type", "integer").put("description", "Max swipes to attempt (default 8)"))
-                })
-                put("required", JSONArray().put("text"))
-            })
-        })
-        put(JSONObject().apply {
-            put("name", "open_app")
-            put("description", "Open an application by its common name or package.")
-            put("parameters", JSONObject().apply {
-                put("type", "object")
-                put("properties", JSONObject().apply {
-                    put("app_name", JSONObject().put("type", "string").put("description", "Name of the app (e.g. YouTube, WhatsApp)"))
-                })
-                put("required", JSONArray().put("app_name"))
-            })
-        })
-        put(JSONObject().apply {
-            put("name", "run_skill")
-            put("description", "Run a deterministic app skill (whatsapp_send, youtube_search, system, instagram, etc.).")
-            put("parameters", JSONObject().apply {
-                put("type", "object")
-                put("properties", JSONObject().apply {
-                    put("name", JSONObject().put("type", "string").put("description", "Name of skill to run"))
-                    put("args", JSONObject().put("type", "object").put("description", "Arguments for the skill"))
-                })
-                put("required", JSONArray().put("name"))
-            })
-        })
-        put(JSONObject().apply {
-            put("name", "press_system")
-            put("description", "Execute system navigation (back, home, recents, notifications, quick_settings).")
-            put("parameters", JSONObject().apply {
-                put("type", "object")
-                put("properties", JSONObject().apply {
-                    put("button", JSONObject().put("type", "string").put("enum", JSONArray().put("back").put("home").put("recents").put("notifications").put("quick_settings")))
-                })
-                put("required", JSONArray().put("button"))
-            })
-        })
-        put(JSONObject().apply {
-            put("name", "speak")
-            put("description", "Speak a short milestone update to the owner (<=12 words).")
-            put("parameters", JSONObject().apply {
-                put("type", "object")
-                put("properties", JSONObject().apply {
-                    put("text", JSONObject().put("type", "string").put("description", "Short update in natural Hinglish"))
-                })
-                put("required", JSONArray().put("text"))
-            })
-        })
-        put(JSONObject().apply {
-            put("name", "ask_user")
-            put("description", "Ask the owner a question by voice when ambiguous and wait for their spoken answer.")
-            put("parameters", JSONObject().apply {
-                put("type", "object")
-                put("properties", JSONObject().apply {
-                    put("question", JSONObject().put("type", "string").put("description", "Question to ask the owner"))
-                    put("options", JSONObject().put("type", "array").put("items", JSONObject().put("type", "string")))
-                })
-                put("required", JSONArray().put("question"))
-            })
-        })
-        put(JSONObject().apply {
-            put("name", "note")
-            put("description", "Save a short memory note across steps.")
-            put("parameters", JSONObject().apply {
-                put("type", "object")
-                put("properties", JSONObject().apply {
-                    put("text", JSONObject().put("type", "string").put("description", "Note content"))
-                })
-                put("required", JSONArray().put("text"))
-            })
-        })
-        put(JSONObject().apply {
-            put("name", "finish")
-            put("description", "Finish the task when the goal has been VERIFIED on screen.")
-            put("parameters", JSONObject().apply {
-                put("type", "object")
-                put("properties", JSONObject().apply {
-                    put("success", JSONObject().put("type", "boolean").put("description", "Whether goal was successfully achieved"))
-                    put("summary", JSONObject().put("type", "string").put("description", "Spoken final result in Hinglish (<=2 sentences)"))
-                    put("data", JSONObject().put("type", "object").put("description", "Optional extracted data (counts, names)"))
-                })
-                put("required", JSONArray().put("success").put("summary"))
-            })
-        })
-        put(JSONObject().apply {
-            put("name", "yield_to_user")
-            put("description", "Hand control back to owner for safety (payment, UPI PIN, credentials, secure screen).")
-            put("parameters", JSONObject().apply {
-                put("type", "object")
-                put("properties", JSONObject().apply {
-                    put("reason", JSONObject().put("type", "string").put("description", "Why manual user intervention is needed"))
-                })
-                put("required", JSONArray().put("reason"))
-            })
-        })
-    }
-
     override suspend fun decide(
         task: String,
         sessionCtx: String,
@@ -200,7 +41,9 @@ object FunctionCallingBrain : AgentBrain {
     ): BrainDecision = withContext(Dispatchers.IO) {
         RateGovernor.acquire()
 
-        val key = GeminiKeyPool.getNextKey()
+        val state = ProviderSettingsManager.loadState()
+        val isGemini = state.providerName.equals("Gemini", ignoreCase = true)
+        val key = if (isGemini) GeminiKeyPool.getNextKey() else null
         if (key.isNullOrBlank()) {
             return@withContext decideWithUniversalApi(task, sessionCtx, notes, history, snapshot)
         }
@@ -215,8 +58,8 @@ object FunctionCallingBrain : AgentBrain {
             val sysPart = JSONObject().put("text", AgentPrompts.BRAIN_SYSTEM)
             root.put("systemInstruction", JSONObject().put("parts", JSONArray().put(sysPart)))
 
-            // 2. Tools
-            val toolsArray = JSONArray().put(JSONObject().put("functionDeclarations", toolDeclarationsJson))
+            // 2. Canonical Tools
+            val toolsArray = JSONArray().put(JSONObject().put("functionDeclarations", ToolSchema.getGeminiFunctionDeclarations()))
             root.put("tools", toolsArray)
 
             // 3. User Message Parts
@@ -226,7 +69,6 @@ object FunctionCallingBrain : AgentBrain {
             if (sessionCtx.isNotBlank()) textBuilder.append("SESSION: ").append(sessionCtx).append("\n")
             if (notes.isNotBlank()) textBuilder.append("NOTES: ").append(notes).append("\n")
 
-            // Playbook hint for foreground app
             val playbook = PlaybookStore.getHint(snapshot.packageName)
             if (!playbook.isNullOrBlank()) {
                 textBuilder.append("APP PLAYBOOK: ").append(playbook).append("\n")
@@ -238,7 +80,7 @@ object FunctionCallingBrain : AgentBrain {
             }
 
             textBuilder.append("\nCURRENT SCREEN:\n")
-            textBuilder.append(snapshot.toCompactText(4000))
+            textBuilder.append(snapshot.toCompactText(4500))
             parts.put(JSONObject().put("text", textBuilder.toString()))
 
             // Add screenshot image
@@ -251,82 +93,86 @@ object FunctionCallingBrain : AgentBrain {
                 })
             }
 
-            val contents = JSONArray().put(JSONObject().apply {
-                put("role", "user")
-                put("parts", parts)
-            })
-            root.put("contents", contents)
+            root.put("contents", JSONArray().put(JSONObject().put("parts", parts)))
 
+            // 4. Generation Config
             val genConfig = JSONObject().apply {
-                put("temperature", if (thinkingLevel == "high") 0.4 else 0.1)
-                put("maxOutputTokens", 2048)
+                put("temperature", 0.1)
+                put("maxOutputTokens", 600)
             }
             root.put("generationConfig", genConfig)
 
-            val request = Request.Builder()
-                .url(url)
-                .post(root.toString().toRequestBody("application/json".toMediaType()))
-                .build()
+            val reqBody = root.toString().toRequestBody("application/json; charset=utf-8".toMediaType())
+            val request = Request.Builder().url(url).post(reqBody).build()
 
             val response = httpClient.newCall(request).execute()
-            val bodyString = response.body?.string() ?: ""
+            val bodyString = response.body?.string().orEmpty()
+            response.close()
 
             if (!response.isSuccessful) {
-                RateGovernor.reportStatus(key, response.code, response.header("Retry-After"))
-                Log.w(TAG, "FunctionCallingBrain Gemini returned ${response.code}, falling back to universal API")
+                Log.w(TAG, "Gemini brain call returned HTTP ${response.code}: $bodyString")
                 return@withContext decideWithUniversalApi(task, sessionCtx, notes, history, snapshot)
             }
 
-            val json = JSONObject(bodyString)
-            val candidate = json.optJSONArray("candidates")?.optJSONObject(0)
-            val contentObj = candidate?.optJSONObject("content")
-            val candidateParts = contentObj?.optJSONArray("parts")
+            val respJson = JSONObject(bodyString)
+            val candidate = respJson.optJSONArray("candidates")?.optJSONObject(0)
+            val contentParts = candidate?.optJSONObject("content")?.optJSONArray("parts")
+
+            if (contentParts == null || contentParts.length() == 0) {
+                return@withContext decideWithUniversalApi(task, sessionCtx, notes, history, snapshot)
+            }
 
             val calls = mutableListOf<AgentCall>()
             var thought = ""
 
-            if (candidateParts != null) {
-                for (i in 0 until candidateParts.length()) {
-                    val part = candidateParts.getJSONObject(i)
-                    if (part.has("text")) {
-                        thought += part.getString("text") + " "
-                    }
-                    if (part.has("functionCall")) {
-                        val fc = part.getJSONObject("functionCall")
-                        val callName = fc.getString("name")
-                        val callArgs = fc.optJSONObject("args") ?: JSONObject()
-                        val callId = "call_${System.currentTimeMillis()}_$i"
-                        val intent = callArgs.optString("intent", "")
-                        calls.add(AgentCall(callId, callName, callArgs, intent))
-                    }
+            for (i in 0 until contentParts.length()) {
+                val part = contentParts.getJSONObject(i)
+                if (part.has("text")) {
+                    thought += part.getString("text") + " "
+                }
+                if (part.has("functionCall")) {
+                    val fc = part.getJSONObject("functionCall")
+                    val callName = fc.getString("name")
+                    val callArgs = fc.optJSONObject("args") ?: JSONObject()
+                    val callId = "call_${System.currentTimeMillis()}_$i"
+                    val intent = callArgs.optString("intent", "")
+                    val rawCall = AgentCall(callId, callName, callArgs, intent)
+                    calls.add(ActionNormalizer.normalize(rawCall))
                 }
             }
 
-            // Check if finish or yield
-            val finishCall = calls.firstOrNull { it.name == "finish" || it.name == "yield_to_user" }
+            if (calls.isEmpty()) {
+                return@withContext decideWithUniversalApi(task, sessionCtx, notes, history, snapshot)
+            }
+
+            // Check if model emitted finish or yield
+            val finishCall = calls.firstOrNull { it.name == "finish" }
             if (finishCall != null) {
-                val success = finishCall.name == "finish" && finishCall.arguments.optBoolean("success", true)
-                val summary = finishCall.arguments.optString("summary", finishCall.arguments.optString("reason", "Task finished"))
+                val success = finishCall.arguments.optBoolean("success", true)
+                val summary = finishCall.arguments.optString("summary", "Task completed")
                 return@withContext BrainDecision(
-                    calls = calls,
+                    calls = listOf(finishCall),
                     thought = thought.trim(),
                     finished = true,
                     outcome = AgentOutcome(success, summary, history.size + 1, 0, data = finishCall.arguments.opt("data"))
                 )
             }
 
-            BrainDecision(calls = calls, thought = thought.trim())
-        } catch (e: Exception) {
-            Log.w(TAG, "FunctionCallingBrain exception: ${e.message}, falling back to universal API")
-            try {
-                decideWithUniversalApi(task, sessionCtx, notes, history, snapshot)
-            } catch (fallbackEx: Exception) {
-                Log.e(TAG, "Universal API fallback failed: ${fallbackEx.message}")
-                BrainDecision(
-                    calls = listOf(AgentCall("err", "finish", JSONObject().put("success", false).put("summary", "Agent error: ${e.message}"))),
-                    finished = true
+            val yieldCall = calls.firstOrNull { it.name == "yield_to_user" }
+            if (yieldCall != null) {
+                val reason = yieldCall.arguments.optString("reason", "Manual user action required")
+                return@withContext BrainDecision(
+                    calls = listOf(yieldCall),
+                    thought = thought.trim(),
+                    finished = true,
+                    outcome = AgentOutcome(false, reason, history.size + 1, 0)
                 )
             }
+
+            BrainDecision(calls = calls, thought = thought.trim())
+        } catch (e: Exception) {
+            Log.e(TAG, "Error in FunctionCallingBrain: ${e.message}", e)
+            decideWithUniversalApi(task, sessionCtx, notes, history, snapshot)
         }
     }
 
@@ -345,42 +191,30 @@ object FunctionCallingBrain : AgentBrain {
         val playbook = PlaybookStore.getHint(snapshot.packageName)
         if (!playbook.isNullOrBlank()) prompt.append("APP PLAYBOOK: ").append(playbook).append("\n")
 
-        prompt.append("\nHISTORY:\n")
+        prompt.append("\nHISTORY (last 4 steps):\n")
         for (step in history.takeLast(4)) {
             prompt.append("- Step ${step.step}: ${step.call.name} -> ${if (step.result.ok) "OK" else "FAIL"}: ${step.result.detail}\n")
         }
 
         prompt.append("\nCURRENT SCREEN ELEMENTS:\n")
-        prompt.append(snapshot.toCompactText(2500))
+        prompt.append(snapshot.toCompactText(4000))
 
-        prompt.append("""
-
-AVAILABLE ACTIONS:
-1. tap_element: {"index": <int>, "intent": "<why>"}
-2. click: {"x": <0-999>, "y": <0-999>, "intent": "<why>"}
-3. type_into: {"text": "<text>", "index": <int optional>, "clear_first": <bool optional>, "press_enter": <bool optional>, "intent": "<why>"}
-4. swipe: {"direction": "up"|"down"|"left"|"right", "distance": "short"|"medium"|"long"}
-5. scroll_until: {"text": "<query>", "direction": "down"|"up"}
-6. open_app: {"app_name_or_package": "<name or package>"}
-7. key_event: {"key": "back"|"home"|"recents"|"notifications"}
-8. wait_for: {"condition": "idle"|"package"|"text", "target": "<str>", "timeout_ms": <int>}
-9. finish: {"success": true|false, "summary": "<spoken result in Hinglish/Urdu/English, max 2 sentences>"}
-10. yield_to_user: {"reason": "<why user must take over>"}
+        prompt.append("\n").append(ToolSchema.getSystemPromptText()).append("""
 
 CRITICAL: Return ONLY a valid JSON object matching this schema:
 {
-  "name": "<action_name>",
+  "name": "<tool_name>",
   "parameters": { ... }
 }
-Do not include any conversational text or markdown code fence outside the JSON.
-        """.trimIndent())
+Do not include any conversational explanation outside the JSON.
+""".trimIndent())
 
         val apiResult = com.example.data.remote.AIApiUtility.executeWithFallback(
             prompt = prompt.toString(),
             mode = "general"
         )
 
-        val rawText = apiResult.getOrNull() ?: ""
+        var rawText = apiResult.getOrNull() ?: ""
         if (rawText.isBlank()) {
             return@withContext BrainDecision(
                 calls = listOf(AgentCall("call_1", "finish", JSONObject().put("success", false).put("summary", "AI service returned no response"))),
@@ -389,41 +223,61 @@ Do not include any conversational text or markdown code fence outside the JSON.
             )
         }
 
-        try {
-            val jsonClean = if (rawText.contains("{") && rawText.contains("}")) {
-                val start = rawText.indexOf('{')
-                val end = rawText.lastIndexOf('}') + 1
-                rawText.substring(start, end)
-            } else {
-                rawText.trim()
-            }
+        var parsedCall = parseJsonToolCall(rawText)
 
+        // One-time repair prompt if initial parsing failed
+        if (parsedCall == null) {
+            Log.w(TAG, "Universal AI reply not valid JSON. Attempting repair prompt...")
+            val repairPrompt = "Convert the following model output into strict JSON matching { \"name\": \"...\", \"parameters\": { ... } }:\n$rawText"
+            val repairResult = com.example.data.remote.AIApiUtility.executeWithFallback(
+                prompt = repairPrompt,
+                mode = "general"
+            )
+            val repairedText = repairResult.getOrNull() ?: ""
+            parsedCall = parseJsonToolCall(repairedText)
+        }
+
+        if (parsedCall == null) {
+            Log.e(TAG, "Failed to parse model tool call after repair: $rawText")
+            val failCall = AgentCall("call_err", "finish", JSONObject().put("success", false).put("summary", "Could not parse model response as a valid tool action."))
+            return@withContext BrainDecision(
+                calls = listOf(failCall),
+                finished = true,
+                outcome = AgentOutcome(false, "Could not parse model action", history.size + 1, 0)
+            )
+        }
+
+        val normalized = ActionNormalizer.normalize(parsedCall)
+
+        if (normalized.name == "finish" || normalized.name == "yield_to_user") {
+            val success = normalized.name == "finish" && normalized.arguments.optBoolean("success", true)
+            val summary = normalized.arguments.optString("summary", normalized.arguments.optString("reason", "Task finished"))
+            return@withContext BrainDecision(
+                calls = listOf(normalized),
+                finished = true,
+                outcome = AgentOutcome(success, summary, history.size + 1, 0, data = normalized.arguments.opt("data"))
+            )
+        }
+
+        BrainDecision(calls = listOf(normalized))
+    }
+
+    private fun parseJsonToolCall(text: String): AgentCall? {
+        val start = text.indexOf('{')
+        val end = text.lastIndexOf('}')
+        if (start < 0 || end <= start) return null
+
+        return try {
+            val jsonClean = text.substring(start, end + 1)
             val actionObj = JSONObject(jsonClean)
-            val callName = actionObj.optString("name", "finish")
+            val callName = actionObj.optString("name", "")
+            if (callName.isBlank()) return null
             val callArgs = actionObj.optJSONObject("parameters") ?: JSONObject()
             val callId = "call_${System.currentTimeMillis()}"
             val intent = callArgs.optString("intent", "")
-
-            val call = AgentCall(callId, callName, callArgs, intent)
-
-            if (callName == "finish" || callName == "yield_to_user") {
-                val success = callName == "finish" && callArgs.optBoolean("success", true)
-                val summary = callArgs.optString("summary", callArgs.optString("reason", "Task finished"))
-                return@withContext BrainDecision(
-                    calls = listOf(call),
-                    finished = true,
-                    outcome = AgentOutcome(success, summary, history.size + 1, 0, data = callArgs.opt("data"))
-                )
-            }
-
-            BrainDecision(calls = listOf(call))
+            AgentCall(callId, callName, callArgs, intent)
         } catch (e: Exception) {
-            Log.w(TAG, "Failed to parse universal AI tool call JSON: ${e.message}, raw: $rawText")
-            BrainDecision(
-                calls = listOf(AgentCall("call_1", "finish", JSONObject().put("success", true).put("summary", rawText.take(150)))),
-                finished = true,
-                outcome = AgentOutcome(true, rawText.take(150), history.size + 1, 0)
-            )
+            null
         }
     }
 }

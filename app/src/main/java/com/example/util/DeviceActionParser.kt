@@ -217,10 +217,78 @@ object DeviceActionParser {
         val actions = mutableListOf<DeviceAction>()
         if (prompt.isBlank()) return actions
 
-        val lowerPrompt = prompt.lowercase()
+        val lowerPrompt = prompt.lowercase().trim()
 
-        // Split multiple tasks by conjunction words: "aur", "and", "phir", "then", "ke baad", "kar ke", "karke", etc.
-        val splitRegex = Regex("\\b(aur phir|aur|and then|and|phir|then|ke baad|fir|baad me|iske baad|saath hi|saath me|kar ke|karke|karo aur|kar do aur|kar do)\\b|[,;\\n]")
+        // 1. High-priority full WhatsApp command pattern: "watsaap kholo lucky2 ko hii likh kar bhejo"
+        if ((lowerPrompt.contains("whatsapp") || lowerPrompt.contains("watsapp") || lowerPrompt.contains("whats app")) &&
+            (lowerPrompt.contains("bhejo") || lowerPrompt.contains("send") || lowerPrompt.contains("likh") || lowerPrompt.contains("msg") || lowerPrompt.contains("message"))
+        ) {
+            val contactMatch = Regex("""(?i)\b([a-zA-Z0-9_\u0900-\u097F]+)\s*ko\b""").find(prompt)
+                ?: Regex("""(?i)\b(?:to|par)\s+([a-zA-Z0-9_\u0900-\u097F]+)""").find(prompt)
+            var rec = contactMatch?.groupValues?.get(1)?.trim() ?: ""
+            if (rec.lowercase() in listOf("whatsapp", "watsapp", "kisi", "kisi ko", "karo", "do")) {
+                rec = if (rec.lowercase() == "kisi" || rec.lowercase() == "kisi ko") "kisi ko" else ""
+            }
+
+            var msg = "Hii"
+            when {
+                lowerPrompt.contains("hii") || lowerPrompt.contains("hi") -> msg = "Hii"
+                lowerPrompt.contains("hello") -> msg = "Hello"
+                else -> {
+                    val quoted = Regex("""['"]([^'"]+)['"]""").find(prompt)
+                    if (quoted != null) {
+                        msg = quoted.groupValues[1].trim()
+                    } else {
+                        val beforeLikh = prompt.substringBefore("likh", prompt.substringBefore("bhejo", ""))
+                        val afterKo = beforeLikh.substringAfter("ko", "").trim()
+                        if (afterKo.isNotBlank() && !afterKo.contains("whatsapp", ignoreCase = true)) {
+                            msg = afterKo
+                        }
+                    }
+                }
+            }
+            actions.add(DeviceAction.WhatsAppMessage(rec, msg))
+            return actions
+        }
+
+        // 2. High-priority YouTube Multi-Step: "youtube open karo aur song search kar ke paheli video play kar do"
+        if (lowerPrompt.contains("youtube") && (lowerPrompt.contains("search") || lowerPrompt.contains("song") || lowerPrompt.contains("gana") || lowerPrompt.contains("play") || lowerPrompt.contains("video"))) {
+            var songQuery = lowerPrompt.replace(Regex("""(?i)\b(open|kholo|youtube|par|pe|me|and|aur|fir|then|search|play|chalao|karo|pahele|pehli|pehla|wali|video|ko|kar|do|karke|ek|koi)\b"""), " ").trim()
+            if (songQuery.isBlank() || songQuery == "song" || songQuery == "gana" || songQuery == "video") {
+                songQuery = "latest trending song"
+            }
+
+            actions.add(DeviceAction.OpenApp("youtube"))
+            actions.add(DeviceAction.YouTubeSearch(songQuery))
+            if (lowerPrompt.contains("play") || lowerPrompt.contains("chalao") || lowerPrompt.contains("pehli") || lowerPrompt.contains("pahele") || lowerPrompt.contains("video")) {
+                actions.add(DeviceAction.YouTubeControl("first"))
+            }
+            if (lowerPrompt.contains("scroll")) {
+                actions.add(DeviceAction.AccessibilityScroll("down"))
+            }
+            if (lowerPrompt.contains("subscribe")) {
+                actions.add(DeviceAction.YouTubePlayAndSubscribe(songQuery, autoSubscribe = true, autoLike = false))
+            }
+            return actions
+        }
+
+        // 3. Direct Navigation Commands (Home, Back, Recents, Scroll)
+        if (lowerPrompt.contains("home button") || lowerPrompt.contains("home screen") || lowerPrompt.contains("home par") || lowerPrompt.contains("home aao") || lowerPrompt == "home") {
+            actions.add(DeviceAction.AccessibilityNav("home"))
+            return actions
+        }
+        if (lowerPrompt.contains("back button") || lowerPrompt.contains("back karo") || lowerPrompt.contains("ek baar back") || lowerPrompt.contains("piche aao") || lowerPrompt == "back") {
+            actions.add(DeviceAction.AccessibilityNav("back"))
+            return actions
+        }
+        if (lowerPrompt.contains("scroll") || lowerPrompt == "scroll" || lowerPrompt.contains("neeche karo") || lowerPrompt.contains("upar karo")) {
+            val dir = if (lowerPrompt.contains("up") || lowerPrompt.contains("upar")) "up" else "down"
+            actions.add(DeviceAction.AccessibilityScroll(dir))
+            return actions
+        }
+
+        // 4. Split multiple tasks by conjunction words: "aur", "and", "phir", "then", "ke baad", etc.
+        val splitRegex = Regex("\\b(aur phir|aur|and then|and|phir|then|ke baad|fir|baad me|iske baad|saath hi|saath me|karo aur|kar do aur)\\b|[,;\\n]")
         val chunks = lowerPrompt.split(splitRegex).map { it.trim() }.filter { it.isNotBlank() }
 
         for (chunk in chunks) {

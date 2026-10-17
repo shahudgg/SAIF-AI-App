@@ -7,25 +7,79 @@ import android.content.pm.PackageManager
 import android.media.AudioFormat
 import android.media.AudioRecord
 import android.media.MediaRecorder
-import android.util.Base64
+import android.media.audiofx.AutomaticGainControl
+import android.media.audiofx.NoiseSuppressor
+import android.os.Process
 import android.util.Log
+import android.widget.Toast
 import androidx.core.content.ContextCompat
-import com.example.util.AudioTranscriptionEngine
+import com.example.stt.AudioPrep
+import com.example.stt.SttProfile
+import com.example.stt.SttRouter
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.NonCancellable
-import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.ByteArrayOutputStream
+import java.nio.ByteBuffer
+import java.nio.ByteOrder
+import kotlin.math.abs
+import kotlin.math.max
+import kotlin.math.min
+import kotlin.math.sqrt
 
-class DirectSpeechInputEngine(private val context: Context) {
+/**
+ * State machine for the in-chat microphone dictation engine.
+ */
+enum class MicState {
+    IDLE,
+    LISTENING,
+    SPEECH,
+    ENDPOINT,
+    TRANSCRIBING,
+    DONE,
+    ERROR
+}
+
+/**
+ * Configuration parameters for in-chat microphone dictation.
+ */
+data class MicConfig(
+    val sampleRate: Int = 16000,
+    val frameDurationMs: Int = 20, // 320 samples per 20ms frame at 16kHz
+    val speechStartThreshold: Float = 0.55f, // Voice activity probability to start
+    val speechHoldThreshold: Float = 0.35f,  // Voice activity probability to hold
+    val speechStartMinDurationMs: Long = 200L, // Sustained speech required to transition to SPEECH
+    val postSpeechSilenceTimeoutMs: Long = 800L, // Auto-stop after ~800ms silence
+    val initialNoSpeechTimeoutMs: Long = 6000L,  // Auto-stop after 6s of complete silence
+    val maxSessionCapMs: Long = 60000L,          // Hard cap 60 seconds
+    val preRollDurationMs: Long = 300L,          // 300ms pre-roll ring buffer
+    val minSpeechDurationMs: Long = 300L         // Minimum voiced audio to transcribe
+)
+
+/**
+ * High-performance, low-latency in-chat dictation microphone engine.
+ * Features dedicated urgent audio thread, circular pre-roll buffer,
+ * hysteresis VAD (800ms silence endpointing), throttled RMS, and SttRouter dispatching.
+ */
+class DirectSpeechInputEngine(
+    private val context: Context,
+    private val config: MicConfig = MicConfig()
+) {
     private val scope = CoroutineScope(Dispatchers.Default)
     private var recordingJob: Job? = null
-    private var interimTranscribeJob: Job? = null
     private var audioRecord: AudioRecord? = null
+    private var noiseSuppressor: NoiseSuppressor? = null
+    private var agc: AutomaticGainControl? = null
+
+    private val _micState = MutableStateFlow(MicState.IDLE)
+    val micState: StateFlow<MicState> = _micState.asStateFlow()
 
     @Volatile
     var isListening: Boolean = false
@@ -33,26 +87,18 @@ class DirectSpeechInputEngine(private val context: Context) {
 
     companion object {
         private const val TAG = "DirectSpeechEngine"
-        private const val SAMPLE_RATE = 16000
         private const val CHANNEL_CONFIG = AudioFormat.CHANNEL_IN_MONO
         private const val AUDIO_FORMAT = AudioFormat.ENCODING_PCM_16BIT
-
-        // Silence timeouts:
-        // 1. If user taps mic and says nothing: allow 5.0 seconds before auto-stopping
-        private const val INITIAL_SILENCE_TIMEOUT_MS = 5000L
-        // 2. If user was speaking and then stops: auto-stop after 1.6s
-        private const val POST_SPEECH_SILENCE_TIMEOUT_MS = 1600L
-        // Safety cap: max 35 seconds per single recording
-        private const val MAX_SESSION_TIMEOUT_MS = 35000L
     }
 
     /**
      * Starts listening directly from the device microphone via native AudioRecord.
-     * ZERO Google SpeechRecognizer / Google Voice UI dialogs are used.
-     * @param onRmsChanged Called with real-time RMS (0f to 10f) to drive wave and glow animations.
-     * @param onInterimResult Called with live transcribed text as user speaks.
-     * @param onFinalResult Called with the final transcription when user finishes speaking.
-     * @param onStateChanged Called when listening starts or stops.
+     * ZERO Google SpeechRecognizer / external dialogs.
+     *
+     * @param onRmsChanged Real-time RMS (0f to 10f) throttled for wave / glow UI animations.
+     * @param onInterimResult Live transcribed text as user speaks.
+     * @param onFinalResult Final transcription when user completes sentence.
+     * @param onStateChanged Called when listening state toggles.
      */
     @SuppressLint("MissingPermission")
     fun startListening(
@@ -65,184 +111,201 @@ class DirectSpeechInputEngine(private val context: Context) {
 
         if (ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
             Log.e(TAG, "RECORD_AUDIO permission not granted")
+            _micState.value = MicState.ERROR
             return
         }
 
-        val minBufferSize = AudioRecord.getMinBufferSize(SAMPLE_RATE, CHANNEL_CONFIG, AUDIO_FORMAT)
+        val frameSamples = (config.sampleRate * config.frameDurationMs) / 1000
+        val minBufferSize = AudioRecord.getMinBufferSize(config.sampleRate, CHANNEL_CONFIG, AUDIO_FORMAT)
         if (minBufferSize <= 0) {
-            Log.e(TAG, "AudioRecord minBufferSize invalid: $minBufferSize")
+            Log.e(TAG, "Invalid AudioRecord minBufferSize: $minBufferSize")
+            _micState.value = MicState.ERROR
             return
         }
 
-        // Initialize pure direct hardware mic: standard MediaRecorder.AudioSource.MIC
+        val bufferSizeInBytes = max(minBufferSize * 2, frameSamples * 4)
+
+        // 1. Hardware Microphone Setup: prefer VOICE_RECOGNITION, fallback to MIC
         audioRecord = try {
             AudioRecord(
-                MediaRecorder.AudioSource.MIC,
-                SAMPLE_RATE,
+                MediaRecorder.AudioSource.VOICE_RECOGNITION,
+                config.sampleRate,
                 CHANNEL_CONFIG,
                 AUDIO_FORMAT,
-                minBufferSize * 2
+                bufferSizeInBytes
             ).takeIf { it.state == AudioRecord.STATE_INITIALIZED }
         } catch (e: Exception) {
             null
         } ?: try {
             AudioRecord(
-                MediaRecorder.AudioSource.VOICE_RECOGNITION,
-                SAMPLE_RATE,
+                MediaRecorder.AudioSource.MIC,
+                config.sampleRate,
                 CHANNEL_CONFIG,
                 AUDIO_FORMAT,
-                minBufferSize * 2
+                bufferSizeInBytes
             ).takeIf { it.state == AudioRecord.STATE_INITIALIZED }
         } catch (e: Exception) {
             null
         }
 
-        if (audioRecord == null || audioRecord?.state != AudioRecord.STATE_INITIALIZED) {
-            Log.e(TAG, "AudioRecord initialization failed")
+        val record = audioRecord
+        if (record == null || record.state != AudioRecord.STATE_INITIALIZED) {
+            Log.e(TAG, "Failed initializing hardware AudioRecord")
+            _micState.value = MicState.ERROR
             return
         }
 
+        // Attach hardware audio effects if available on device
+        try {
+            if (NoiseSuppressor.isAvailable()) {
+                noiseSuppressor = NoiseSuppressor.create(record.audioSessionId)?.apply { enabled = true }
+            }
+            if (AutomaticGainControl.isAvailable()) {
+                agc = AutomaticGainControl.create(record.audioSessionId)?.apply { enabled = true }
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "Audio effect initialization note: ${e.message}")
+        }
+
         isListening = true
+        _micState.value = MicState.LISTENING
         onStateChanged(true)
 
         recordingJob = scope.launch(Dispatchers.IO) {
-            val pcmBuffer = ByteArrayOutputStream()
-            val buffer = ShortArray(1024)
-            var hasSpoken = false
+            // Set urgent audio thread priority
+            try {
+                Process.setThreadPriority(Process.THREAD_PRIORITY_URGENT_AUDIO)
+            } catch (ignored: Exception) {}
+
+            val preRollFramesCount = (config.preRollDurationMs / config.frameDurationMs).toInt()
+            val preRollRingBuffer = Array(max(1, preRollFramesCount)) { ShortArray(frameSamples) }
+            var preRollWriteIdx = 0
+
+            val pcmOutput = ByteArrayOutputStream()
+            val frameBuffer = ShortArray(frameSamples)
+
+            var isSpeechActive = false
+            var speechSustainedMs = 0L
             var consecutiveSilenceMs = 0L
-            var speechFrames = 0
+            var totalVoicedMs = 0L
+
             val sessionStartTime = System.currentTimeMillis()
-            var lastInterimTime = System.currentTimeMillis()
-            var ambientNoiseFloor = 120.0
-            var smoothedRms = 100.0
-            var frameCount = 0
-            var readErrorCount = 0
+            var lastRmsEmissionTime = 0L
+            var smoothedRms = 120.0
+            var noiseFloor = 100.0
 
             try {
-                audioRecord?.startRecording()
-                Log.d(TAG, "Hardware mic recording started successfully (MIC direct)")
+                record.startRecording()
+                Log.d(TAG, "Hardware mic recording started (source=${record.audioSource})")
 
                 while (isActive && isListening) {
-                    val readSize = audioRecord?.read(buffer, 0, buffer.size) ?: 0
-                    if (readSize <= 0) {
-                        readErrorCount++
-                        if (readErrorCount > 10) {
-                            Log.w(TAG, "Multiple consecutive audio read errors ($readSize). Stopping...")
-                            break
-                        }
-                        delay(20)
+                    val readSamples = record.read(frameBuffer, 0, frameSamples)
+                    if (readSamples <= 0) {
                         continue
                     }
-                    readErrorCount = 0
-                    frameCount++
 
-                    // Calculate hardware RMS for this frame
-                    var sum = 0.0
-                    for (i in 0 until readSize) {
-                        val sample = buffer[i].toDouble()
-                        sum += sample * sample
-                    }
-                    val frameRms = kotlin.math.sqrt(sum / readSize)
-
-                    // Exponential smoothing to ignore instant transient spikes
-                    smoothedRms = if (frameCount <= 2) frameRms else (smoothedRms * 0.7 + frameRms * 0.3)
-
-                    // Ambient noise floor tracking
-                    if (frameCount <= 6) {
-                        ambientNoiseFloor = minOf(ambientNoiseFloor, frameRms).coerceIn(40.0, 300.0)
-                    } else if (frameRms < ambientNoiseFloor * 1.3) {
-                        ambientNoiseFloor = (ambientNoiseFloor * 0.96 + frameRms * 0.04).coerceIn(40.0, 350.0)
-                    }
-
-                    // Adaptive speech threshold: voice is at least 1.45x ambient noise or >= 160
-                    val speechThreshold = maxOf(160.0, ambientNoiseFloor * 1.45 + 30.0)
-                    val isCurrentFrameSpeech = smoothedRms > speechThreshold
-
-                    // Scaled level (0.0 to 10.0) for UI animation
-                    val level = ((smoothedRms - ambientNoiseFloor) / 1800.0).coerceIn(0.0, 1.0).toFloat()
-                    val scaledRms = level * 10f
-
-                    // Non-blocking UI update for glow & responsive wave
-                    scope.launch(Dispatchers.Main) {
-                        if (isListening) {
-                            onRmsChanged(scaledRms)
+                    // 1. Frame Energy and Feature Extraction
+                    var sumEnergy = 0.0
+                    var zeroCrossings = 0
+                    var prevSample = 0
+                    for (i in 0 until readSamples) {
+                        val s = frameBuffer[i].toInt()
+                        sumEnergy += (s.toDouble() * s.toDouble())
+                        if ((s >= 0 && prevSample < 0) || (s < 0 && prevSample >= 0)) {
+                            zeroCrossings++
                         }
+                        prevSample = s
+                    }
+                    val frameRms = sqrt(sumEnergy / readSamples)
+
+                    // Exponential smoothing for RMS & noise floor tracking
+                    smoothedRms = smoothedRms * 0.75 + frameRms * 0.25
+                    if (frameRms < noiseFloor * 1.25) {
+                        noiseFloor = noiseFloor * 0.95 + frameRms * 0.05
+                    }
+                    noiseFloor = noiseFloor.coerceIn(30.0, 450.0)
+
+                    // 2. Compute Voice Activity Probability
+                    val snrRatio = smoothedRms / max(1.0, noiseFloor)
+                    val zcrRate = zeroCrossings.toDouble() / readSamples
+                    var speechProbability = when {
+                        snrRatio > 3.0 -> 0.95f
+                        snrRatio > 2.0 -> 0.75f
+                        snrRatio > 1.4 && zcrRate in 0.03..0.45 -> 0.60f
+                        snrRatio > 1.2 -> 0.40f
+                        else -> 0.10f
                     }
 
+                    // 3. Hysteresis VAD State Machine
                     val now = System.currentTimeMillis()
-                    val frameDurationMs = (readSize * 1000L) / SAMPLE_RATE
-
-                    if (isCurrentFrameSpeech) {
-                        speechFrames++
-                        // Confirm speech if sustained or loud voice
-                        if (speechFrames >= 1 || smoothedRms > speechThreshold * 1.5) {
-                            hasSpoken = true
-                        }
-                        consecutiveSilenceMs = 0L
-
-                        // Append raw PCM data
-                        for (i in 0 until readSize) {
-                            pcmBuffer.write(buffer[i].toInt() and 0xFF)
-                            pcmBuffer.write((buffer[i].toInt() shr 8) and 0xFF)
+                    if (isSpeechActive) {
+                        if (speechProbability >= config.speechHoldThreshold) {
+                            consecutiveSilenceMs = 0L
+                            totalVoicedMs += config.frameDurationMs
+                        } else {
+                            consecutiveSilenceMs += config.frameDurationMs
                         }
 
-                        // Interim live transcription while speaking (approx every 2.4s)
-                        if (now - lastInterimTime > 2400L && pcmBuffer.size() > 32000) {
-                            lastInterimTime = now
-                            val snapshot = pcmBuffer.toByteArray()
-                            interimTranscribeJob?.cancel()
-                            interimTranscribeJob = scope.launch(Dispatchers.IO) {
-                                val apiKey = AudioTranscriptionEngine.resolveActiveApiKey()
-                                if (apiKey.isNotBlank()) {
-                                    val wavData = AudioTranscriptionEngine.wrapPcmToWav(snapshot, SAMPLE_RATE, 1, 16)
-                                    val base64 = Base64.encodeToString(wavData, Base64.NO_WRAP)
-                                    val res = AudioTranscriptionEngine.transcribeWav(apiKey, base64, wavData)
-                                    if (res.isSuccess) {
-                                        val interimText = res.getOrNull()?.trim() ?: ""
-                                        if (interimText.isNotBlank()) {
-                                            withContext(Dispatchers.Main) {
-                                                onInterimResult(interimText)
-                                            }
-                                        }
-                                    }
-                                }
-                            }
+                        // Write PCM to active utterance buffer
+                        appendSamplesToStream(pcmOutput, frameBuffer, readSamples)
+
+                        // Check 800ms silence endpointing
+                        if (consecutiveSilenceMs >= config.postSpeechSilenceTimeoutMs) {
+                            Log.d(TAG, "Silence endpoint detected (${consecutiveSilenceMs}ms). Stopping recording.")
+                            _micState.value = MicState.ENDPOINT
+                            break
                         }
                     } else {
-                        speechFrames = 0
-                        consecutiveSilenceMs += frameDurationMs
+                        // Check if voice begins
+                        if (speechProbability >= config.speechStartThreshold) {
+                            speechSustainedMs += config.frameDurationMs
+                            if (speechSustainedMs >= config.speechStartMinDurationMs) {
+                                isSpeechActive = true
+                                _micState.value = MicState.SPEECH
+                                Log.d(TAG, "Speech active detected. Flushing pre-roll buffer (${preRollFramesCount * config.frameDurationMs}ms).")
 
-                        if (hasSpoken) {
-                            // User was speaking: continue capturing trailing audio buffer so the word ending is not cut
-                            for (i in 0 until readSize) {
-                                pcmBuffer.write(buffer[i].toInt() and 0xFF)
-                                pcmBuffer.write((buffer[i].toInt() shr 8) and 0xFF)
-                            }
-
-                            // Post-speech silence endpoint: auto-stop after 1.5 seconds
-                            if (consecutiveSilenceMs >= POST_SPEECH_SILENCE_TIMEOUT_MS) {
-                                Log.d(TAG, "Silence timeout detected after speech (${consecutiveSilenceMs}ms). Auto-stopping mic...")
-                                break
+                                // Flush pre-roll circular buffer so first word consonants are never lost
+                                for (i in 0 until preRollFramesCount) {
+                                    val idx = (preRollWriteIdx + i) % preRollFramesCount
+                                    appendSamplesToStream(pcmOutput, preRollRingBuffer[idx], frameSamples)
+                                }
+                                appendSamplesToStream(pcmOutput, frameBuffer, readSamples)
+                                totalVoicedMs += (config.preRollDurationMs + speechSustainedMs)
                             }
                         } else {
-                            // User tapped mic but remained quiet: auto-stop after 2.0 seconds
-                            if (consecutiveSilenceMs >= INITIAL_SILENCE_TIMEOUT_MS) {
-                                Log.d(TAG, "Initial silence timeout (${consecutiveSilenceMs}ms) without speech. Auto-stopping mic...")
+                            speechSustainedMs = max(0L, speechSustainedMs - config.frameDurationMs)
+                            consecutiveSilenceMs += config.frameDurationMs
+
+                            // Keep pre-roll circular buffer updated
+                            System.arraycopy(frameBuffer, 0, preRollRingBuffer[preRollWriteIdx], 0, frameSamples)
+                            preRollWriteIdx = (preRollWriteIdx + 1) % preRollFramesCount
+
+                            // Initial silence timeout (6s)
+                            if (consecutiveSilenceMs >= config.initialNoSpeechTimeoutMs) {
+                                Log.d(TAG, "Initial silence timeout reached (${consecutiveSilenceMs}ms). Auto-stopping.")
                                 break
                             }
                         }
                     }
 
-                    // Safety timeout cap
-                    if (now - sessionStartTime > MAX_SESSION_TIMEOUT_MS) {
-                        Log.d(TAG, "Max session timeout reached ($MAX_SESSION_TIMEOUT_MS ms). Auto-stopping mic...")
-                        break
+                    // 4. Throttled UI Animation RMS update (max 30 fps)
+                    if (now - lastRmsEmissionTime >= 33L) {
+                        lastRmsEmissionTime = now
+                        val normalizedLevel = ((smoothedRms - noiseFloor) / 1400.0).coerceIn(0.0, 1.0).toFloat()
+                        val scaledRms = normalizedLevel * 10f
+                        withContext(Dispatchers.Main) {
+                            if (isListening) onRmsChanged(scaledRms)
+                        }
                     }
 
-                    delay(8)
+                    // Safety cap timeout
+                    if (now - sessionStartTime >= config.maxSessionCapMs) {
+                        Log.d(TAG, "Max session cap reached (${config.maxSessionCapMs}ms). Auto-stopping.")
+                        break
+                    }
                 }
             } catch (e: Exception) {
-                Log.e(TAG, "Audio recording exception: ${e.message}")
+                Log.e(TAG, "Audio recording loop error: ${e.message}")
             } finally {
                 stopInternal()
 
@@ -252,28 +315,48 @@ class DirectSpeechInputEngine(private val context: Context) {
                         onStateChanged(false)
                     }
 
-                    // Transcribe complete utterance via Gemini / Whisper / OpenRouter if speech was recorded
-                    if ((hasSpoken || pcmBuffer.size() > 4000) && pcmBuffer.size() > 3200) {
-                        interimTranscribeJob?.cancel()
-                        val fullAudio = pcmBuffer.toByteArray()
-                        val apiKey = AudioTranscriptionEngine.resolveActiveApiKey()
-                        val wavData = AudioTranscriptionEngine.wrapPcmToWav(fullAudio, SAMPLE_RATE, 1, 16)
-                        val base64 = Base64.encodeToString(wavData, Base64.NO_WRAP)
-                        val res = AudioTranscriptionEngine.transcribeWav(apiKey, base64, wavData)
-                        if (res.isSuccess) {
-                            val finalText = res.getOrNull()?.trim() ?: ""
-                            if (finalText.isNotBlank()) {
-                                withContext(Dispatchers.Main) {
-                                    onFinalResult(finalText)
+                    // Transcribe if voiced audio exists
+                    val capturedPcm = pcmOutput.toByteArray()
+                    if (capturedPcm.size >= (config.minSpeechDurationMs * config.sampleRate * 2 / 1000) && isSpeechActive) {
+                        _micState.value = MicState.TRANSCRIBING
+                        val cleanWav = AudioPrep.pcmToWav(AudioPrep.processPcm(capturedPcm, config.sampleRate), config.sampleRate)
+                        val sttResult = SttRouter.transcribe(
+                            wavBytes = cleanWav,
+                            profile = SttProfile.DICTATION,
+                            context = context,
+                            durationMs = totalVoicedMs
+                        )
+
+                        withContext(Dispatchers.Main) {
+                            if (sttResult.isSuccess) {
+                                _micState.value = MicState.DONE
+                                onFinalResult(sttResult.text)
+                            } else {
+                                _micState.value = MicState.IDLE
+                                if (sttResult.rejectedReason != null && !sttResult.rejectedReason.contains("Ghost phrase") && !sttResult.rejectedReason.contains("Empty")) {
+                                    Toast.makeText(context, sttResult.rejectedReason, Toast.LENGTH_SHORT).show()
                                 }
                             }
                         }
+                    } else {
+                        _micState.value = MicState.IDLE
                     }
                 }
             }
         }
     }
 
+    private fun appendSamplesToStream(out: ByteArrayOutputStream, samples: ShortArray, count: Int) {
+        val byteBuf = ByteBuffer.allocate(count * 2).order(ByteOrder.LITTLE_ENDIAN)
+        for (i in 0 until count) {
+            byteBuf.putShort(samples[i])
+        }
+        out.write(byteBuf.array(), 0, count * 2)
+    }
+
+    /**
+     * Stops listening immediately and triggers transcription of captured audio.
+     */
     fun stopListening() {
         if (!isListening) return
         isListening = false
@@ -285,15 +368,24 @@ class DirectSpeechInputEngine(private val context: Context) {
         isListening = false
         try {
             audioRecord?.stop()
-        } catch (e: Exception) {}
+        } catch (ignored: Exception) {}
         try {
             audioRecord?.release()
-        } catch (e: Exception) {}
+        } catch (ignored: Exception) {}
         audioRecord = null
+
+        try {
+            noiseSuppressor?.release()
+        } catch (ignored: Exception) {}
+        noiseSuppressor = null
+
+        try {
+            agc?.release()
+        } catch (ignored: Exception) {}
+        agc = null
     }
 
     fun release() {
         stopListening()
-        interimTranscribeJob?.cancel()
     }
 }

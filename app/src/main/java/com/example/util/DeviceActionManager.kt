@@ -466,6 +466,45 @@ object DeviceActionManager {
         }
     }
 
+    fun searchPlayStore(context: Context, query: String): Boolean {
+        val cleanQuery = query.trim()
+        val success = try {
+            val marketUri = if (cleanQuery.isNotBlank()) {
+                Uri.parse("market://search?q=${Uri.encode(cleanQuery)}&c=apps")
+            } else {
+                Uri.parse("market://search?q=")
+            }
+            val intent = Intent(Intent.ACTION_VIEW, marketUri).apply {
+                setPackage("com.android.vending")
+                flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP
+            }
+            context.startActivity(intent)
+            true
+        } catch (e: Exception) {
+            try {
+                val webUri = Uri.parse("https://play.google.com/store/search?q=${Uri.encode(cleanQuery)}&c=apps")
+                val webIntent = Intent(Intent.ACTION_VIEW, webUri).apply {
+                    flags = Intent.FLAG_ACTIVITY_NEW_TASK
+                }
+                context.startActivity(webIntent)
+                true
+            } catch (ex: Exception) {
+                launchApp(context, "playstore")
+            }
+        }
+
+        // Accessibility typing assist if user is already on the search screen
+        val acc = SaifAccessibilityService.instance
+        if (acc != null && acc.isAppInForeground("com.android.vending") && cleanQuery.isNotBlank()) {
+            val clickedSearch = acc.findAndClickFuzzy("Search") || acc.findAndClickByViewId("search_box") || acc.findAndClickByViewId("search_bar")
+            if (clickedSearch) {
+                acc.findAndType(cleanQuery)
+                acc.pressEnterOrSearch()
+            }
+        }
+        return success
+    }
+
     fun controlYouTube(context: Context, command: String): String {
         val acc = SaifAccessibilityService.instance
         return when (command.lowercase()) {
@@ -946,16 +985,9 @@ object DeviceActionManager {
     // 17. Notification & Message Reading
     fun readLatestSms(context: Context, limit: Int = 4): List<String> {
         val smsList = mutableListOf<String>()
-        if (ContextCompat.checkSelfPermission(context, Manifest.permission.READ_SMS) != PackageManager.PERMISSION_GRANTED) {
-            PermissionManager.showPermissionPrompt(
-                PermissionPromptData(
-                    id = "read_sms",
-                    title = "SMS Permission Required",
-                    message = "Aapke SMS messages padh kar sunane ke liye SMS permission allow kijiye.",
-                    manifestPermission = Manifest.permission.READ_SMS
-                )
-            )
-            return smsList
+        val hasReadSms = ContextCompat.checkSelfPermission(context, Manifest.permission.READ_SMS) == PackageManager.PERMISSION_GRANTED
+        if (!hasReadSms) {
+            return smsList // Sideload-safe: SMS reading via content provider omitted to prevent Play Protect block
         }
         var cursor: Cursor? = null
         try {
@@ -1215,7 +1247,7 @@ object DeviceActionManager {
         return "WhatsApp par $targetName ko live location bhej di gayi hai sir!"
     }
 
-    // 20b. Autonomous WhatsApp Message Sender with Guaranteed Send Click
+    // 20b. Autonomous WhatsApp Message Sender with Guaranteed Send Click and Real-Time Voice Narration
     suspend fun automateWhatsAppMessage(context: Context, recipient: String, message: String): String {
         val cleanMsg = message.trim().ifBlank { "Hii" }
         var phone = recipient.filter { it.isDigit() || it == '+' }
@@ -1231,6 +1263,7 @@ object DeviceActionManager {
         val acc = SaifAccessibilityService.instance
 
         if (phone.length >= 7) {
+            com.example.utils.TTSManager.speak("Main WhatsApp khol raha hoon sir...", context)
             val cleanDigits = phone.filter { it.isDigit() }
             val url = "https://api.whatsapp.com/send?phone=$cleanDigits&text=${Uri.encode(cleanMsg)}"
             val intent = Intent(Intent.ACTION_VIEW, Uri.parse(url)).apply {
@@ -1249,6 +1282,7 @@ object DeviceActionManager {
             }
 
             delay(1500L)
+            com.example.utils.TTSManager.speak("Chat khul gayi, ab '$cleanMsg' bhej raha hoon...", context)
 
             // Automate clicking the WhatsApp SEND button with retries!
             var sent = false
@@ -1260,13 +1294,22 @@ object DeviceActionManager {
                 delay(400L)
             }
 
+            com.example.utils.TTSManager.speak("WhatsApp par message send kar diya hai sir, ho gaya send!", context)
             return "WhatsApp par message send kar diya hai sir!"
         } else {
             val pm = context.packageManager
             val launchIntent = pm.getLaunchIntentForPackage("com.whatsapp")
             if (launchIntent != null) {
-                launchIntent.flags = Intent.FLAG_ACTIVITY_NEW_TASK
-                context.startActivity(launchIntent)
+                val isAlreadyOpen = acc?.isWhatsAppInForeground() ?: false
+                if (!isAlreadyOpen) {
+                    com.example.utils.TTSManager.speak("Main WhatsApp khol raha hoon sir...", context)
+                    launchIntent.flags = Intent.FLAG_ACTIVITY_NEW_TASK
+                    context.startActivity(launchIntent)
+                    delay(1800L)
+                } else {
+                    com.example.utils.TTSManager.speak("WhatsApp pehle se open hai sir...", context)
+                    delay(400L)
+                }
             } else {
                 return "WhatsApp phone me nahi mila."
             }
@@ -1277,29 +1320,34 @@ object DeviceActionManager {
             }
 
             val dm = context.resources.displayMetrics
-            delay(1600L)
+            val targetLabel = if (cleanRec.isNotBlank() && cleanRec != "kisi" && cleanRec != "kisi ko") cleanRec else "contact"
 
             if (cleanRec.isNotBlank() && !cleanRec.equals("kisi", ignoreCase = true) && !cleanRec.equals("kisi ko", ignoreCase = true)) {
+                com.example.utils.TTSManager.speak("WhatsApp khul gaya, ab $targetLabel ki profile dhoondh raha hoon...", context)
                 // Search for contact
                 val searchClicked = acc.findAndClickByViewId("menuitem_search") ||
                         acc.findAndClick("search") || acc.findAndClick("खोजें") ||
                         acc.performHumanTap(dm.widthPixels * 0.82f, dm.heightPixels * 0.08f)
-                delay(600L)
+                delay(700L)
                 acc.findAndType(cleanRec)
-                delay(800L)
-                acc.clickFirstClickableInList() || acc.performHumanTap(dm.widthPixels * 0.5f, dm.heightPixels * 0.18f)
+                delay(1000L)
+                
+                // Click on the matching contact card or first search result
+                val contactClicked = acc.findAndClickFuzzy(cleanRec) || acc.clickFirstClickableInList() || acc.performHumanTap(dm.widthPixels * 0.5f, dm.heightPixels * 0.20f)
+                delay(1200L)
             } else {
-                // "kisi ko" -> select first active chat
+                com.example.utils.TTSManager.speak("WhatsApp khul gaya, chat open kar raha hoon...", context)
                 acc.clickFirstClickableInList() || acc.performHumanTap(dm.widthPixels * 0.5f, dm.heightPixels * 0.22f)
+                delay(1000L)
             }
 
-            delay(1000L)
+            com.example.utils.TTSManager.speak("Chat open ho gayi, ab '$cleanMsg' likh raha hoon...", context)
 
             // Focus and Type into message entry field
             acc.findAndClickByViewId("entry") || acc.findAndClick("Message") || acc.findAndClick("संदेश")
-            delay(350L)
+            delay(400L)
             acc.findAndType(cleanMsg, "Message")
-            delay(500L)
+            delay(600L)
 
             // Click the Send button with retries!
             var sent = false
@@ -1311,17 +1359,26 @@ object DeviceActionManager {
                 delay(400L)
             }
 
-            val targetLabel = if (cleanRec.isNotBlank() && cleanRec != "kisi" && cleanRec != "kisi ko") cleanRec else "contact"
+            com.example.utils.TTSManager.speak("$targetLabel ko '$cleanMsg' bhej diya hai sir, ho gaya send!", context)
             return "WhatsApp par $targetLabel ko '$cleanMsg' bhej diya hai sir!"
         }
     }
 
-    // 21. YouTube Play & Auto-Subscribe
+    // 21. YouTube Play & Auto-Subscribe with Step-by-Step Voice Guidance
     suspend fun automateYouTubePlayAndSubscribe(context: Context, query: String, autoSubscribe: Boolean = true, autoLike: Boolean = false): String {
-        val cleanQuery = query.trim()
+        val cleanQuery = query.trim().ifBlank { "trending song" }
         val acc = SaifAccessibilityService.instance
 
-        if (cleanQuery.isNotBlank()) {
+        val isYtOpen = acc?.isYouTubeInForeground() ?: false
+        if (isYtOpen) {
+            com.example.utils.TTSManager.speak("YouTube pehle se open hai sir. Ab '$cleanQuery' search kar raha hoon...", context)
+            acc.findAndClickSearchButton()
+            delay(500L)
+            acc.findAndType(cleanQuery)
+            delay(400L)
+            acc.pressEnterOrSearch()
+        } else {
+            com.example.utils.TTSManager.speak("Main YouTube khol raha hoon sir...", context)
             val uri = Uri.parse("https://www.youtube.com/results?search_query=${Uri.encode(cleanQuery)}")
             val intent = Intent(Intent.ACTION_VIEW, uri).apply {
                 setPackage("com.google.android.youtube")
@@ -1332,29 +1389,36 @@ object DeviceActionManager {
             } catch (e: Exception) {
                 searchYouTube(context, cleanQuery)
             }
-        } else {
-            searchYouTube(context, cleanQuery)
+            delay(2000L)
+            com.example.utils.TTSManager.speak("YouTube par '$cleanQuery' search kar diya hai...", context)
         }
 
         if (acc == null) {
             return "YouTube par '$cleanQuery' search kar diya hai. Video play karne ke liye Accessibility allow kijiye."
         }
 
-        delay(1800L) // Wait for search results to load
+        delay(1600L) // Wait for video results to populate
+
+        com.example.utils.TTSManager.speak("Search results aa gaye hain, ab pehli video play kar raha hoon sir...", context)
 
         // Click first real video result, strictly skipping mic, voice search, and filter chips!
         var videoClicked = false
-        for (attempt in 1..5) {
+        for (attempt in 1..6) {
             if (acc.clickYouTubeFirstVideo()) {
                 videoClicked = true
                 break
             }
-            delay(500L)
+            delay(600L)
+        }
+
+        if (videoClicked) {
+            com.example.utils.TTSManager.speak("Pehli video play kar di hai sir!", context)
         }
 
         var subMsg = ""
         if (autoSubscribe) {
             delay(2200L) // Wait for player to start playing
+            com.example.utils.TTSManager.speak("Channel subscribe kar raha hoon sir...", context)
             acc.scroll(forward = true) // Scroll down slightly to reveal subscribe button below player
             delay(500L)
             for (attempt in 1..4) {

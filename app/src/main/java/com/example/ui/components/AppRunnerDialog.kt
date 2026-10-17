@@ -5,6 +5,7 @@ import android.content.Intent
 import android.hardware.camera2.CameraManager
 import android.os.Build
 import android.view.ViewGroup
+import android.webkit.ConsoleMessage
 import android.webkit.WebChromeClient
 import android.webkit.WebSettings
 import android.webkit.WebView
@@ -670,7 +671,21 @@ private fun LiveWebViewApp(
                 settings.cacheMode = WebSettings.LOAD_DEFAULT
                 settings.userAgentString = "Mozilla/5.0 (Linux; Android 14; Pixel 8 Pro) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Mobile Safari/537.36"
                 webViewClient = WebViewClient()
-                webChromeClient = WebChromeClient()
+                webChromeClient = object : WebChromeClient() {
+                    override fun onJsAlert(view: WebView?, url: String?, message: String?, result: android.webkit.JsResult?): Boolean {
+                        message?.let { Toast.makeText(ctx, it, Toast.LENGTH_SHORT).show() }
+                        result?.confirm()
+                        return true
+                    }
+                    override fun onJsConfirm(view: WebView?, url: String?, message: String?, result: android.webkit.JsResult?): Boolean {
+                        result?.confirm()
+                        return true
+                    }
+                    override fun onConsoleMessage(consoleMessage: ConsoleMessage?): Boolean {
+                        android.util.Log.d("AppRunnerWebView", "${consoleMessage?.message()} -- From line ${consoleMessage?.lineNumber()} of ${consoleMessage?.sourceId()}")
+                        return true
+                    }
+                }
                 loadUrl("file://${targetFile.absolutePath}")
                 internalWebView = this
                 onWebViewCreated?.invoke(this)

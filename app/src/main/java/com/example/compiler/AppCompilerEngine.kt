@@ -371,10 +371,11 @@ object AppCompilerEngine {
                             data = customizeArsc(data, project.appName)
                             emit("✓ Bound launcher application label: '${project.appName}' into APK resources.")
                         } else if (name == "AndroidManifest.xml") {
-                            data = customizeAxml(data, cleanTargetPkg)
+                            data = customizeAxml(data, cleanTargetPkg, project.appName)
                             emit("✓ Bound application package: '$cleanTargetPkg' and launcher entrypoint.")
-                        } else if (name == "res/drawable/ic_launcher.png" && userIconBytes != null) {
-                            data = userIconBytes
+                        } else if (name == "res/drawable/ic_launcher.png") {
+                            val iconData = userIconBytes ?: generateDefaultLauncherIcon(project.appName)
+                            data = iconData
                             emit("✓ Injected custom launcher icon into res/drawable/ic_launcher.png.")
                         }
 
@@ -463,7 +464,15 @@ object AppCompilerEngine {
                         zos.write(appConfigJson.toByteArray(Charsets.UTF_8))
                         zos.closeEntry()
 
-                        // 5. Extra Assets & Drawables if any
+                        // 5. Launcher icon
+                        val iconBytes = resolveUserIconPngBytes(context, project, projectDir)
+                        if (iconBytes != null && iconBytes.isNotEmpty()) {
+                            zos.putNextEntry(ZipEntry("res/drawable/ic_launcher.png"))
+                            zos.write(iconBytes)
+                            zos.closeEntry()
+                        }
+
+                        // 6. Extra Assets & Drawables if any
                         val assetsDir = File(projectDir, "app/src/main/assets")
                         if (assetsDir.exists()) {
                             assetsDir.walkTopDown().filter { it.isFile }.forEach { assetFile ->
@@ -1055,13 +1064,13 @@ $stringFields
     private fun customizeArsc(baseBytes: ByteArray, newAppName: String): ByteArray {
         try {
             if (baseBytes.size < 40) return baseBytes
-            val s0 = "res/drawable/ic_launcher.png".toByteArray(Charsets.UTF_8)
-            val s0Encoded = byteArrayOf(s0.size.toByte(), s0.size.toByte()) + s0 + byteArrayOf(0)
+            val s0 = newAppName.toByteArray(Charsets.UTF_8)
+            val s0CharCount = minOf(newAppName.length, 127).toByte()
+            val s0ByteCount = minOf(s0.size, 127).toByte()
+            val s0Encoded = byteArrayOf(s0CharCount, s0ByteCount) + s0 + byteArrayOf(0)
 
-            val s1 = newAppName.toByteArray(Charsets.UTF_8)
-            val s1CharCount = minOf(newAppName.length, 127).toByte()
-            val s1ByteCount = minOf(s1.size, 127).toByte()
-            val s1Encoded = byteArrayOf(s1CharCount, s1ByteCount) + s1 + byteArrayOf(0)
+            val s1 = "res/drawable/ic_launcher.png".toByteArray(Charsets.UTF_8)
+            val s1Encoded = byteArrayOf(s1.size.toByte(), s1.size.toByte()) + s1 + byteArrayOf(0)
 
             val offsets = listOf(0, s0Encoded.size)
             var strData = s0Encoded + s1Encoded
@@ -1109,7 +1118,7 @@ $stringFields
      * while binding the launcher Activity to com.saif.apprunner.MainActivity and
      * normalizing platform/compile SDK versions to standard release Android 14 (SDK 34, REL).
      */
-    private fun customizeAxml(baseAxml: ByteArray, newPkgName: String): ByteArray {
+    private fun customizeAxml(baseAxml: ByteArray, newPkgName: String, newAppName: String = ""): ByteArray {
         try {
             if (baseAxml.size < 40) return baseAxml
             val spOff = 8
@@ -1141,6 +1150,8 @@ $stringFields
                 if (s == "com.saif.apprunner") {
                     strings.add(newPkgName)
                     foundPkg = true
+                } else if (s == "App Runner" && newAppName.isNotBlank()) {
+                    strings.add(newAppName)
                 } else if (s == ".MainActivity") {
                     strings.add("com.saif.apprunner.MainActivity")
                 } else if (s == "16") {

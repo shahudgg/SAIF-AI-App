@@ -7,6 +7,7 @@ import com.example.agent.brain.AgentBrainFactory
 import com.example.agent.brain.ComputerUseBrain
 import com.example.agent.safety.GateResult
 import com.example.agent.safety.RiskGuard
+import com.example.data.local.ProviderSettingsManager
 import com.example.data.remote.GeminiKeyPool
 import com.example.util.SaifAccessibilityService
 import kotlinx.coroutines.delay
@@ -30,7 +31,14 @@ object PhoneAgent {
         AgentLogger.log("Starting agent execution for goal: '${task.goal}'")
 
         // 1. Preflight checks
-        val service = SaifAccessibilityService.instance
+        var service = SaifAccessibilityService.instance
+        if (service == null && SaifAccessibilityService.isServiceEnabled(context)) {
+            for (i in 1..4) {
+                delay(250)
+                service = SaifAccessibilityService.instance
+                if (service != null) break
+            }
+        }
         if (service == null || !SaifAccessibilityService.isServiceEnabled(context)) {
             val msg = "Accessibility permission band hai. Kripya phone settings me Accessibility on kijiye."
             AgentLogger.log("Preflight failed: Accessibility service not running")
@@ -46,8 +54,11 @@ object PhoneAgent {
             return AgentOutcome(false, msg, 0, 0, "SCREEN_LOCKED")
         }
 
-        if (GeminiKeyPool.getAllValidKeys().isEmpty()) {
-            val msg = "Gemini API key missing hai. Kripya Settings me jakar Gemini key enter karein."
+        val state = ProviderSettingsManager.loadState()
+        val hasAnyKey = state.apiKeys.any { it.isNotBlank() && !it.contains("MY_") } ||
+            GeminiKeyPool.getAllValidKeys().isNotEmpty()
+        if (!hasAnyKey) {
+            val msg = "AI key missing hai. Kripya Settings ⚙️ ➔ AI Provider me jakar apni API key add karein."
             task.listener?.onFinished(AgentOutcome(false, msg, 0, 0, "NO_API_KEY"))
             return AgentOutcome(false, msg, 0, 0, "NO_API_KEY")
         }
@@ -71,8 +82,11 @@ object PhoneAgent {
             stepCount++
             val stepStart = System.currentTimeMillis()
 
-            // 1. OBSERVE
-            service.waitForIdle(AgentConfig.IDLE_TIMEOUT_MS, AgentConfig.IDLE_QUIET_MS)
+            // 1. OBSERVE & DISMISS POPUPS
+            if (PopupHandler.dismissIfPresent(service)) {
+                AgentLogger.log("PopupHandler automatically dismissed on-screen blocker.")
+                service.waitForIdle(AgentConfig.IDLE_TIMEOUT_MS, AgentConfig.IDLE_QUIET_MS)
+            }
             val snapshot = ScreenObserver.capture(withScreenshot = true)
 
             // 2. STUCK DETECTION
@@ -132,7 +146,14 @@ object PhoneAgent {
 
                     // Save successful macro sequence
                     if (requestedSuccess) {
-                        MacroCache.put(snapshot.packageName, task.goal, history.map { it.call.name })
+                        MacroCache.put(snapshot.packageName, task.goal, history.map { step ->
+                            val target = step.call.arguments.optString("text").ifBlank {
+                                step.call.arguments.optString("app_name").ifBlank {
+                                    step.call.arguments.optString("id")
+                                }
+                            }
+                            if (target.isNotBlank()) "${step.call.name}[$target]" else step.call.name
+                        })
                     }
 
                     val finalOutcome = AgentOutcome(

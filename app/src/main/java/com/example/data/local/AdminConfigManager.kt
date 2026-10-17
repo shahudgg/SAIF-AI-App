@@ -136,12 +136,14 @@ object AdminConfigManager {
         if (jsonStr != null) {
             try {
                 val json = JSONObject(jsonStr)
-                val rawKey = json.optString("defaultApiKey", "")
-                val finalKey = if (rawKey.isBlank() || rawKey.contains("MY_")) cleanGoogleDefault else rawKey
-                val rawProv = json.optString("defaultProvider", "Gemini")
+                val rawKey = json.optString("defaultApiKey", "").trim()
+                val rawProv = json.optString("defaultProvider", "Gemini").trim()
                 val finalProv = if (rawProv.isBlank()) "Gemini" else rawProv
+                val finalKey = if (rawKey.isBlank() || rawKey.contains("MY_")) {
+                    if (finalProv.equals("Gemini", ignoreCase = true)) cleanGoogleDefault else ""
+                } else rawKey
 
-                val rawModel = json.optString("defaultModel", "gemini-2.0-flash")
+                val rawModel = json.optString("defaultModel", "gemini-2.0-flash").trim()
                 val cleanModel = if (rawModel.contains("2.5-flash", ignoreCase = true) || rawModel.isBlank()) "gemini-2.0-flash" else rawModel
 
                 _globalConfig.value = AdminGlobalConfig(
@@ -230,12 +232,14 @@ object AdminConfigManager {
 
                     if (snapshot != null && snapshot.exists()) {
                         val rawKey = snapshot.getString("defaultApiKey") ?: snapshot.getString("apiKey") ?: ""
-                        val googleDefaultKey = try { com.example.BuildConfig.GEMINI_API_KEY } catch (e: Exception) { "" }.trim()
-                        val cleanGoogleDefault = if (googleDefaultKey.isNotBlank() && !googleDefaultKey.contains("MY_")) googleDefaultKey else ""
-                        val apiKey = if (rawKey.isBlank() || rawKey.contains("MY_")) cleanGoogleDefault else rawKey
-
                         val rawProvider = snapshot.getString("defaultProvider") ?: snapshot.getString("provider") ?: "Gemini"
                         val provider = if (rawProvider.isBlank()) "Gemini" else rawProvider
+
+                        val googleDefaultKey = try { com.example.BuildConfig.GEMINI_API_KEY } catch (e: Exception) { "" }.trim()
+                        val cleanGoogleDefault = if (googleDefaultKey.isNotBlank() && !googleDefaultKey.contains("MY_")) googleDefaultKey else ""
+                        val apiKey = if (rawKey.isBlank() || rawKey.contains("MY_")) {
+                            if (provider.equals("Gemini", ignoreCase = true)) cleanGoogleDefault else ""
+                        } else rawKey
 
                         val rawModel = snapshot.getString("defaultModel") ?: snapshot.getString("model") ?: "gemini-2.0-flash"
                         val model = if ((rawModel.contains("llama", ignoreCase = true) && provider == "Gemini") || rawModel.contains("2.5-flash", ignoreCase = true)) "gemini-2.0-flash" else rawModel
@@ -874,9 +878,25 @@ object AdminConfigManager {
                 .build()
 
             val request = when {
+                provider.contains("Ashna", ignoreCase = true) -> {
+                    val m = model.trim().ifBlank { "ashna-x1" }
+                    val json = org.json.JSONObject().apply {
+                        put("model", m)
+                        put("messages", org.json.JSONArray().apply {
+                            put(org.json.JSONObject().put("role", "user").put("content", "Ping"))
+                        })
+                    }
+                    okhttp3.Request.Builder()
+                        .url("https://api.ashna.ai/v1/api/chat/completions")
+                        .addHeader("Authorization", "Bearer $cleanKey")
+                        .addHeader("x-api-key", cleanKey)
+                        .addHeader("api-key", cleanKey)
+                        .post(json.toString().toRequestBody("application/json".toMediaTypeOrNull()))
+                        .build()
+                }
                 provider.equals("Gemini", ignoreCase = true) -> {
                     val rawM = model.trim().ifBlank { "gemini-2.0-flash" }
-                    val m = if (rawM.contains("2.5-flash", ignoreCase = true)) "gemini-2.0-flash" else rawM
+                    val m = if (rawM.isBlank() || rawM.contains("2.5") || rawM.contains("3.")) "gemini-2.0-flash" else rawM
                     val url = "https://generativelanguage.googleapis.com/v1beta/models/$m:generateContent?key=$cleanKey"
                     val json = org.json.JSONObject().apply {
                         put("contents", org.json.JSONArray().apply {
@@ -1037,8 +1057,8 @@ object AdminConfigManager {
                         .post(json.toString().toRequestBody("application/json".toMediaTypeOrNull()))
                         .build()
                 }
-                provider.equals("InceptionLabs", ignoreCase = true) -> {
-                    val m = model.trim().ifBlank { "merlin-32k" }
+                provider.contains("inception", ignoreCase = true) -> {
+                    val m = model.trim().ifBlank { "mercury-2.5" }
                     val json = org.json.JSONObject().apply {
                         put("model", m)
                         put("messages", org.json.JSONArray().apply {
@@ -1051,8 +1071,11 @@ object AdminConfigManager {
                         .post(json.toString().toRequestBody("application/json".toMediaTypeOrNull()))
                         .build()
                 }
-                provider.equals("Atria ASI", ignoreCase = true) || provider.equals("Atria", ignoreCase = true) -> {
-                    val m = model.trim().ifBlank { "atria-1" }
+                provider.contains("atria", ignoreCase = true) -> {
+                    val rawM = model.trim()
+                    val m = if (rawM.contains("FP8", true)) "Atria-Dawn-Preview-FP8"
+                    else if (rawM.isBlank() || rawM.equals("atria-1", true) || rawM.equals("atria-dawn", true) || rawM.contains("dawn", true)) "Atria-Dawn-Preview"
+                    else rawM
                     val json = org.json.JSONObject().apply {
                         put("model", m)
                         put("messages", org.json.JSONArray().apply {
@@ -1062,6 +1085,7 @@ object AdminConfigManager {
                     okhttp3.Request.Builder()
                         .url("https://api.atria-asi.ai/v1/chat/completions")
                         .addHeader("Authorization", "Bearer $cleanKey")
+                        .addHeader("X-Api-Key", cleanKey)
                         .post(json.toString().toRequestBody("application/json".toMediaTypeOrNull()))
                         .build()
                 }

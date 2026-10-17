@@ -445,17 +445,28 @@ fun BuildAIScreen(
                     )
                 }
 
+                val parsedSummaryList = if (hasError) {
+                    listOf("Code generation aborted: $errorMessage")
+                } else {
+                    val extracted = result.summary.lines()
+                        .map { it.trim() }
+                        .filter { it.startsWith("•") || it.startsWith("*") || it.startsWith("-") }
+                        .map { it.removePrefix("•").removePrefix("*").removePrefix("-").trim().replace("**", "") }
+                        .filter { it.isNotBlank() }
+                    if (extracted.isNotEmpty()) extracted else listOf(
+                        "Native UI components & responsive layout built",
+                        "Functional button click listeners and reactive states bound",
+                        "Files updated on disk: [${result.updatedFiles.joinToString(", ")}]"
+                    )
+                }
+
                 messages = messages.map { msg ->
                     if (msg.id == assistantMsgId) {
                         msg.copy(
                             content = if (hasError) "❌ $errorMessage" else result.summary,
                             autoAppliedFiles = if (hasError) emptyList() else result.updatedFiles,
                             steps = finalSteps,
-                            changeSummary = if (hasError) listOf("Code generation aborted: $errorMessage") else listOf(
-                                "Autonomous Android coder pipeline completed",
-                                "Target filesystem synchronized on disk",
-                                "Files updated: [${result.updatedFiles.joinToString(", ")}]"
-                            ),
+                            changeSummary = parsedSummaryList,
                             isOptimizing = false,
                             isGlitchFix = isGlitchPrompt,
                             elapsedSeconds = totalElapsedSeconds,

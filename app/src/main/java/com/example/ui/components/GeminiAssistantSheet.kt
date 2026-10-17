@@ -148,17 +148,26 @@ After the action block (or if no action needed), give a short, natural, friendly
                 base64Images = emptyList(),
                 onChunk = { /* streaming */ }
             )
-            val rawReply = responseResult.getOrNull() ?: GeminiService.generateLocalSmartResponse(trimmed, "creative")
-            val parsed = DeviceActionParser.parse(rawReply, trimmed)
-            val cleanReply = parsed.cleanSpokenText.ifBlank {
-                if (parsed.actions.isNotEmpty()) "Theek hai, sabhi actions execute kar diye hain." else rawReply
+            val hasError = !responseResult.isSuccess
+            val rawReply = if (hasError) {
+                "⚠️ " + (responseResult.exceptionOrNull()?.message ?: "Response nahi mil saka. Kripya Settings me apna API key check karein.")
+            } else {
+                responseResult.getOrNull().orEmpty()
+            }
+            val parsed = if (hasError) null else DeviceActionParser.parse(rawReply, trimmed)
+            val cleanReply = if (hasError) {
+                rawReply
+            } else {
+                parsed?.cleanSpokenText?.ifBlank {
+                    if (parsed.actions.isNotEmpty()) "Theek hai, sabhi actions execute kar diye hain." else rawReply
+                } ?: rawReply
             }
 
             assistantResponse = cleanReply
             mode = AssistantSheetState.RESPONDED
 
             // Execute device actions sequentially if any
-            if (parsed.actions.isNotEmpty()) {
+            if (parsed != null && parsed.actions.isNotEmpty()) {
                 launch {
                     DeviceActionManager.executeActionsSequentially(context, parsed.actions)
                 }

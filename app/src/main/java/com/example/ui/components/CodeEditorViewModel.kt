@@ -89,6 +89,14 @@ class CodeEditorViewModel : ViewModel() {
         }
         _projectData.value = project
         isInitialized = true
+        _activeFile.value = null
+        _editorTextFieldValue.value = TextFieldValue("")
+        _isDirty.value = false
+        editorHistory = EditorHistory("")
+        _canUndo.value = false
+        _canRedo.value = false
+        _fileTree.value = emptyList()
+        _expandedPaths.value = emptySet()
 
         viewModelScope.launch(Dispatchers.IO) {
             try {

@@ -2,19 +2,13 @@ package com.example.agent
 
 import android.util.Log
 import com.example.agent.brain.AgentPrompts
-import com.example.data.remote.GeminiKeyPool
 import com.example.data.remote.ModelResolver
 import com.example.data.remote.ModelRole
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
-import okhttp3.MediaType.Companion.toMediaType
-import okhttp3.OkHttpClient
-import okhttp3.Request
-import okhttp3.RequestBody.Companion.toRequestBody
-import org.json.JSONArray
 import org.json.JSONObject
-import java.util.concurrent.TimeUnit
+import java.util.Locale
 
 enum class RouteDestination {
     TASK,
@@ -28,18 +22,29 @@ data class RouteDecision(
     val controlCmd: String? = null
 )
 
+/**
+ * High-accuracy intent router with word-boundary matching,
+ * task-lane isolation, and multi-provider compatibility.
+ */
 object IntentRouter {
     private const val TAG = "SAIF_AGENT"
 
-    private val httpClient = OkHttpClient.Builder()
-        .connectTimeout(3, TimeUnit.SECONDS)
-        .readTimeout(3, TimeUnit.SECONDS)
-        .build()
+    // High-confidence, exact stop words. Deliberately excludes loose words like "bas" or "chup"
+    // which occur naturally in sentences ("bas ek minute", "yeh basic hai").
+    private val STOP_WORD_REGEX = Regex(
+        """^(stop|ruko|rukiye|cancel|band karo|rok do|khatam karo)$""",
+        RegexOption.IGNORE_CASE
+    )
 
-    private val STOP_KEYWORDS = listOf("stop", "ruko", "chup", "cancel", "bas", "rok do", "khatam karo", "band karo")
+    private val STATUS_QUERY_REGEX = Regex(
+        """\b(kya kar rahe ho|status batao|kaha tak pahuncha|task status)\b""",
+        RegexOption.IGNORE_CASE
+    )
 
     suspend fun route(utterance: String, isTaskRunning: Boolean): RouteDecision {
-        val clean = utterance.trim().lowercase()
+        val clean = utterance.trim().lowercase(Locale.ROOT)
+            .replace(Regex("""[.,!?]"""), "")
+            .trim()
 
         // 0. If UserDialogBridge is actively waiting for an answer to a question (e.g. contact selection)
         if (UserDialogBridge.isAwaitingAnswer()) {
@@ -49,19 +54,29 @@ object IntentRouter {
             }
         }
 
-        // 1. Zero-latency STOP check
-        for (stopWord in STOP_KEYWORDS) {
-            if (clean == stopWord || clean.startsWith("$stopWord ") || clean.endsWith(" $stopWord")) {
-                return RouteDecision(RouteDestination.CONTROL, utterance, controlCmd = "stop")
-            }
+        // 1. Strict isolated STOP command check
+        if (STOP_WORD_REGEX.matches(clean)) {
+            return RouteDecision(RouteDestination.CONTROL, utterance, controlCmd = "stop")
         }
 
-        if (clean.contains("kya kar rahe ho") || clean.contains("status")) {
+        if (STATUS_QUERY_REGEX.containsMatchIn(clean)) {
             return RouteDecision(RouteDestination.CONTROL, utterance, controlCmd = "status")
         }
 
-        // 2. Fast LLM Classification
-        val llmResult = withTimeoutOrNull(2000L) {
+        // 2. Fast-path heuristic classification (0ms latency, eliminates 3.5-second classification delay)
+        val heuristic = heuristicClassify(utterance, isTaskRunning)
+        if (heuristic.route == RouteDestination.TASK) {
+            return heuristic
+        }
+
+        // 3. Simple greeting or conversational phrases -> route to CHAT immediately
+        val conversationalGreeting = Regex("""^(hi|hii|hello|hey|namaste|kya haal hai|kaise ho|who are you|tum kaun ho|good morning|good evening)$""", RegexOption.IGNORE_CASE)
+        if (conversationalGreeting.matches(clean)) {
+            return RouteDecision(RouteDestination.CHAT, utterance)
+        }
+
+        // 4. LLM Classification fallback for complex ambiguous requests (short timeout 1800ms)
+        val llmResult = withTimeoutOrNull(1800L) {
             classifyWithFastModel(utterance, isTaskRunning)
         }
 
@@ -69,53 +84,32 @@ object IntentRouter {
             return llmResult
         }
 
-        // 3. Heuristic fallback
-        return heuristicClassify(utterance)
+        return heuristic
     }
 
     private suspend fun classifyWithFastModel(utterance: String, isTaskRunning: Boolean): RouteDecision? = withContext(Dispatchers.IO) {
-        val key = GeminiKeyPool.getNextKey() ?: return@withContext null
-        val model = ModelResolver.resolve(ModelRole.ROUTER)
-        val url = "https://generativelanguage.googleapis.com/v1beta/models/$model:generateContent?key=$key"
+        val sysText = AgentPrompts.ROUTER_SYSTEM.replace("{{RUNNING_TASK_OR_NONE}}", if (isTaskRunning) "YES" else "NONE")
 
         try {
-            val root = JSONObject()
-            val sysText = AgentPrompts.ROUTER_SYSTEM.replace("{{RUNNING_TASK_OR_NONE}}", if (isTaskRunning) "YES" else "NONE")
-            root.put("systemInstruction", JSONObject().put("parts", JSONArray().put(JSONObject().put("text", sysText))))
-
-            val contents = JSONArray().put(JSONObject().apply {
-                put("role", "user")
-                put("parts", JSONArray().put(JSONObject().put("text", utterance)))
-            })
-            root.put("contents", contents)
-
-            val genConfig = JSONObject().apply {
-                put("temperature", 0.0)
-                put("maxOutputTokens", 256)
-                put("responseMimeType", "application/json")
-            }
-            root.put("generationConfig", genConfig)
-
-            val request = Request.Builder()
-                .url(url)
-                .post(root.toString().toRequestBody("application/json".toMediaType()))
-                .build()
-
-            val response = httpClient.newCall(request).execute()
-            val bodyString = response.body?.string() ?: ""
-
-            if (response.isSuccessful) {
-                val json = JSONObject(bodyString)
-                val text = json.optJSONArray("candidates")?.optJSONObject(0)
-                    ?.optJSONObject("content")?.optJSONArray("parts")?.optJSONObject(0)
-                    ?.optString("text", "") ?: ""
-
-                if (text.isNotBlank()) {
-                    val cleanJson = text.trim().removeSurrounding("```json", "```").removeSurrounding("```", "```").trim()
-                    val resJson = JSONObject(cleanJson)
-                    val routeStr = resJson.optString("route", "chat").lowercase()
+            val result = com.example.data.remote.AIApiUtility.executeWithFallback(
+                prompt = utterance,
+                mode = "general",
+                customSystemPrompt = sysText
+            )
+            val text = result.getOrNull()
+            if (!text.isNullOrBlank()) {
+                val cleanJson = text.trim()
+                    .removePrefix("```json")
+                    .removePrefix("```")
+                    .removeSuffix("```")
+                    .trim()
+                val jsonStart = cleanJson.indexOf('{')
+                val jsonEnd = cleanJson.lastIndexOf('}')
+                if (jsonStart >= 0 && jsonEnd > jsonStart) {
+                    val resJson = JSONObject(cleanJson.substring(jsonStart, jsonEnd + 1))
+                    val routeStr = resJson.optString("route", "chat").lowercase(Locale.ROOT)
                     val goal = resJson.optString("goal", utterance)
-                    val control = resJson.optString("control", null)
+                    val control = if (resJson.has("control") && !resJson.isNull("control")) resJson.optString("control") else null
 
                     val destination = when (routeStr) {
                         "task" -> RouteDestination.TASK
@@ -126,22 +120,35 @@ object IntentRouter {
                 }
             }
         } catch (e: Exception) {
-            Log.w(TAG, "Fast router failed, using heuristic: ${e.message}")
+            Log.w(TAG, "Fast router LLM failed, using heuristic: ${e.message}")
         }
         null
     }
 
-    private fun heuristicClassify(utterance: String): RouteDecision {
-        val lower = utterance.lowercase()
-        val taskVerbs = listOf(
-            "kholo", "open", "chalao", "play", "bhejo", "send", "call", "dial",
-            "search", "khojo", "like", "subscribe", "scroll", "update", "torch",
-            "alarm", "timer", "volume", "batao", "screen", "instagram", "whatsapp",
-            "youtube", "capcut", "location"
+    private fun heuristicClassify(utterance: String, isTaskRunning: Boolean): RouteDecision {
+        val lower = utterance.lowercase(Locale.ROOT)
+
+        // Strict command patterns with word boundaries (avoids matching "I like this", "what is a call option", "likely")
+        val taskPatterns = listOf(
+            Regex("""\b(kholo|open)\s+[a-z0-9]+"""),
+            Regex("""\b(chalao|play|chalu karo)\b"""),
+            Regex("""\b(bhejo|send message|live location)\b"""),
+            Regex("""\b(call karo|phone lagao|dial)\b"""),
+            Regex("""\b(search karo|khojo)\b"""),
+            Regex("""\b(like karo|subscribe karo)\b"""),
+            Regex("""\b(scroll karo|scroll down|next video)\b"""),
+            Regex("""\b(update all|update karo)\b"""),
+            Regex("""\b(torch|flashlight|flashlight on|flashlight off)\b"""),
+            Regex("""\b(alarm lagao|timer lagao)\b"""),
+            Regex("""\b(volume badhao|volume kam karo)\b"""),
+            Regex("""\byoutube\b.*(chalao|search|play|kholo)"""),
+            Regex("""\bwhatsapp\b.*(bhejo|kholo|message)"""),
+            Regex("""\binstagram\b.*(reel|story|kholo)"""),
+            Regex("""\bcapcut\b.*(project|video|edit)""")
         )
 
-        for (verb in taskVerbs) {
-            if (lower.contains(verb)) {
+        for (pattern in taskPatterns) {
+            if (pattern.containsMatchIn(lower)) {
                 return RouteDecision(RouteDestination.TASK, utterance)
             }
         }

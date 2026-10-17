@@ -74,28 +74,33 @@ object AppSkill : Skill {
     }
 
     override suspend fun run(args: JSONObject, env: AgentEnv): SkillResult {
-        val appName = args.optString("app_name", "").ifBlank { args.optString("name", "") }
+        val appName = args.optString("app_name", "").ifBlank {
+            args.optString("app_name_or_package", "").ifBlank {
+                args.optString("name", "").ifBlank {
+                    args.optString("package", "")
+                }
+            }
+        }
         if (appName.isBlank()) {
             return SkillResult(false, "App name not specified")
         }
 
-        val wrapper = ContextWrapper(env.context)
-        val pkg = resolvePackage(wrapper, appName)
+        val launchResult = com.example.agent.AppLauncher.launchVerified(env.context, appName)
+        if (launchResult.success) {
+            return SkillResult(true, launchResult.message, data = mapOf("package" to launchResult.targetPackage))
+        }
 
-        if (pkg.isNullOrBlank()) {
-            // App not installed
+        val pkg = com.example.agent.AppResolver.resolvePackage(env.context, appName)
+        if (pkg == null) {
             Log.w(TAG, "App '$appName' not installed on device")
-            return SkillResult(false, "App '$appName' is not installed on this device. Would you like to install it from Play Store?", data = mapOf("offerPlayStore" to true, "appName" to appName))
+            return SkillResult(
+                false,
+                "App '$appName' is not installed on this device. Would you like to install it from Play Store?",
+                data = mapOf("offerPlayStore" to true, "appName" to appName)
+            )
         }
 
-        val launched = DeviceActionManager.launchApp(env.context, pkg)
-        if (launched) {
-            // Await package foreground verification
-            env.service?.waitForPackage(pkg, 3500)
-            return SkillResult(true, "App opened successfully: $appName", data = mapOf("package" to pkg))
-        }
-
-        return SkillResult(false, "Failed to launch $appName")
+        return SkillResult(false, launchResult.message)
     }
 
     class ContextWrapper(val context: android.content.Context)

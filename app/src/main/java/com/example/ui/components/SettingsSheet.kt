@@ -39,6 +39,7 @@ import androidx.compose.material.icons.filled.Computer
 import androidx.compose.material.icons.filled.DarkMode
 import androidx.compose.material.icons.filled.LightMode
 import androidx.compose.material.icons.filled.PlayArrow
+import androidx.compose.material.icons.filled.Stop
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.Lock
@@ -80,16 +81,40 @@ data class VoiceProfile(
     val id: String, 
     val name: String, 
     val description: String, 
+    val emotion: String = "Warm & Natural",
     val gender: String, 
     val pitch: Float, 
     val speechRate: Float, 
-    val targetEngineNameMatches: List<String>
+    val previewHinglish: String = "Bilkul! Mai SAIF AI hoon, aapse smoothly aur natural emotion ke saath baat karne ke liye taiyaar.",
+    val previewEnglish: String = "Hello, I am SAIF AI, speaking with natural clarity and emotion.",
+    val targetEngineNameMatches: List<String> = emptyList()
 )
 
 val VOICE_PROFILES = listOf(
-    VoiceProfile("Zephyr", "Zephyr", "Fast, sharp", "Male", 0.90f, 1.20f, listOf("en-in-x-ene-local", "en-us-x-iom#male_2")),
-    VoiceProfile("Fenrir", "Fenrir", "Authoritative, crisp", "Male", 0.75f, 1.00f, listOf("en-us-x-sfg#male_2", "en-in-x-ene-local")),
-    VoiceProfile("Leda", "Leda", "Soft, soothing", "Female", 1.05f, 0.88f, listOf("en-us-x-iom#female_1", "hi-in-x-hic-local"))
+    VoiceProfile(
+        id = "Fenrir",
+        name = "Kabir",
+        description = "Deep, confident, podcast baritone (Hindi & English)",
+        emotion = "🎙️ Deep & Calm",
+        gender = "Male",
+        pitch = 0.88f,
+        speechRate = 0.95f,
+        previewHinglish = "Hello. Mai Kabir hoon. Har topic ko deeply, smoothly aur confidently explain karna mera style hai.",
+        previewEnglish = "Greetings. I am Kabir. Here to provide thoughtful, authoritative guidance.",
+        targetEngineNameMatches = listOf("en-in-x-end-network", "en-in-x-ene-local", "hi-in-x-hia-network", "hi-in-x-hia-local", "en_in", "hi_in")
+    ),
+    VoiceProfile(
+        id = "Priya",
+        name = "Priya",
+        description = "Cheerful, sweet, bubbly & joyful (Hindi & English)",
+        emotion = "✨ Cheerful & Sweet",
+        gender = "Female",
+        pitch = 1.10f,
+        speechRate = 0.98f,
+        previewHinglish = "Hi there! Mai Priya hoon! Aaiye milkar kuch naya, super interesting aur mazedaar banate hain!",
+        previewEnglish = "Hi there! I am Priya, ready to bring creativity and joy to every task!",
+        targetEngineNameMatches = listOf("en-in-x-cxx-network", "en-in-x-cxx-local", "hi-in-x-hic-local", "hi-in-x-hid-network", "en_in", "hi_in")
+    )
 )
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -116,7 +141,10 @@ fun SettingsSheet(
     var wakeWordSavedFeedback by remember { mutableStateOf(false) }
     var wakeWordPresets by remember { mutableStateOf(com.example.util.WakeWordManager.getPresets(context)) }
 
-    var selectedVoiceId by remember { mutableStateOf(prefs.getString("selected_voice_id", "Zephyr") ?: "Zephyr") }
+    var selectedVoiceId by remember { 
+        val saved = prefs.getString("selected_voice_id", "Fenrir") ?: "Fenrir"
+        mutableStateOf(if (saved == "Priya") "Priya" else "Fenrir")
+    }
     var ttsVoices by remember { mutableStateOf(VOICE_PROFILES) }
     var ttsInstance by remember { mutableStateOf<android.speech.tts.TextToSpeech?>(null) }
     
@@ -779,27 +807,73 @@ fun SettingsSheet(
 
                     HorizontalDivider(color = SaifTheme.colors.cardBorder)
 
+
+                    var previewLanguage by remember { mutableStateOf("Hinglish") }
+                    val isSpeakingGlobal by com.example.utils.TTSManager.isSpeaking.collectAsState()
+                    val activeSpeakingText by com.example.utils.TTSManager.currentlySpeakingText.collectAsState()
+
                     Row(
                         modifier = Modifier
                             .fillMaxWidth()
-                            .padding(horizontal = 16.dp, vertical = 12.dp),
-                        horizontalArrangement = Arrangement.SpaceBetween
+                            .padding(horizontal = 16.dp, vertical = 10.dp),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
                     ) {
-                        Text(
-                            text = "Choose Voice",
-                            fontSize = 13.sp,
-                            fontWeight = FontWeight.SemiBold,
-                            color = SaifTheme.colors.textPrimary
-                        )
-                        Text(
-                            text = "Tap speaker to test",
-                            fontSize = 11.sp,
-                            color = SaifTheme.colors.textSecondary
-                        )
+                        Column {
+                            Text(
+                                text = "Choose AI Voice & Emotion",
+                                fontSize = 13.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = SaifTheme.colors.textPrimary
+                            )
+                            Text(
+                                text = "Smooth natural Hinglish & English",
+                                fontSize = 11.sp,
+                                color = SaifTheme.colors.textSecondary
+                            )
+                        }
+
+                        // Preview Language Selector Toggle
+                        Row(
+                            horizontalArrangement = Arrangement.spacedBy(4.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Surface(
+                                onClick = { previewLanguage = "Hinglish" },
+                                shape = RoundedCornerShape(12.dp),
+                                color = if (previewLanguage == "Hinglish") com.example.ui.theme.PrimaryAccent else SaifTheme.colors.primaryBackground,
+                                border = androidx.compose.foundation.BorderStroke(1.dp, if (previewLanguage == "Hinglish") Color(0xFFA855F7) else Color(0x33FFFFFF))
+                            ) {
+                                Text(
+                                    text = "🇮🇳 Hinglish",
+                                    fontSize = 10.5.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    color = if (previewLanguage == "Hinglish") Color.White else SaifTheme.colors.textSecondary,
+                                    modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
+                                )
+                            }
+                            Surface(
+                                onClick = { previewLanguage = "English" },
+                                shape = RoundedCornerShape(12.dp),
+                                color = if (previewLanguage == "English") com.example.ui.theme.PrimaryAccent else SaifTheme.colors.primaryBackground,
+                                border = androidx.compose.foundation.BorderStroke(1.dp, if (previewLanguage == "English") Color(0xFFA855F7) else Color(0x33FFFFFF))
+                            ) {
+                                Text(
+                                    text = "🌐 English",
+                                    fontSize = 10.5.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    color = if (previewLanguage == "English") Color.White else SaifTheme.colors.textSecondary,
+                                    modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
+                                )
+                            }
+                        }
                     }
 
                     ttsVoices.forEach { voice ->
                         val isActive = voice.id == selectedVoiceId
+                        val testPhrase = if (previewLanguage == "Hinglish") voice.previewHinglish else voice.previewEnglish
+                        val isThisVoicePreviewing = isSpeakingGlobal && (activeSpeakingText == testPhrase || activeSpeakingText?.contains(voice.name.take(4)) == true)
+
                         Row(
                             modifier = Modifier
                                 .fillMaxWidth()
@@ -807,13 +881,13 @@ fun SettingsSheet(
                                     selectedVoiceId = voice.id
                                     prefs.edit().putString("selected_voice_id", voice.id).apply()
                                 }
-                                .padding(horizontal = 16.dp, vertical = 12.dp),
+                                .padding(horizontal = 16.dp, vertical = 10.dp),
                             verticalAlignment = Alignment.CenterVertically
                         ) {
                             Box(
                                 contentAlignment = Alignment.Center,
                                 modifier = Modifier
-                                    .size(36.dp)
+                                    .size(38.dp)
                                     .clip(CircleShape)
                                     .background(if (isActive) com.example.ui.theme.PrimaryAccent else SaifTheme.colors.primaryBackground)
                             ) {
@@ -833,8 +907,22 @@ fun SettingsSheet(
                                         fontWeight = FontWeight.SemiBold,
                                         color = SaifTheme.colors.textPrimary
                                     )
+                                    Spacer(modifier = Modifier.width(6.dp))
+                                    Surface(
+                                        color = Color(0x22A855F7),
+                                        shape = RoundedCornerShape(6.dp),
+                                        border = androidx.compose.foundation.BorderStroke(0.5.dp, Color(0x66A855F7))
+                                    ) {
+                                        Text(
+                                            text = voice.emotion,
+                                            color = Color(0xFFC084FC),
+                                            fontSize = 9.sp,
+                                            fontWeight = FontWeight.Bold,
+                                            modifier = Modifier.padding(horizontal = 5.dp, vertical = 1.5.dp)
+                                        )
+                                    }
                                     if (isActive) {
-                                        Spacer(modifier = Modifier.width(8.dp))
+                                        Spacer(modifier = Modifier.width(6.dp))
                                         Surface(
                                             color = com.example.ui.theme.PrimaryAccent,
                                             shape = RoundedCornerShape(4.dp)
@@ -849,27 +937,32 @@ fun SettingsSheet(
                                         }
                                     }
                                 }
+                                Spacer(modifier = Modifier.height(2.dp))
                                 Text(
                                     text = "${voice.gender} • ${voice.description}",
-                                    fontSize = 12.sp,
+                                    fontSize = 11.5.sp,
                                     color = SaifTheme.colors.textSecondary
                                 )
                             }
                             IconButton(onClick = {
-                                com.example.utils.TTSManager.previewVoice(context, "Hello, I am SAIF AI, your personal AI agent.", voice.id)
+                                if (isThisVoicePreviewing) {
+                                    com.example.utils.TTSManager.stop()
+                                } else {
+                                    com.example.utils.TTSManager.previewVoice(context, testPhrase, voice.id)
+                                }
                             }) {
                                 Box(
                                     contentAlignment = Alignment.Center,
                                     modifier = Modifier
-                                        .size(32.dp)
+                                        .size(34.dp)
                                         .clip(CircleShape)
-                                        .background(SaifTheme.colors.primaryBackground)
+                                        .background(if (isThisVoicePreviewing) Color(0xFFEF4444).copy(alpha = 0.2f) else SaifTheme.colors.primaryBackground)
                                 ) {
                                     Icon(
-                                        imageVector = Icons.Default.PlayArrow,
-                                        contentDescription = "Play",
-                                        tint = SaifTheme.colors.textPrimary,
-                                        modifier = Modifier.size(16.dp)
+                                        imageVector = if (isThisVoicePreviewing) Icons.Default.Stop else Icons.Default.PlayArrow,
+                                        contentDescription = if (isThisVoicePreviewing) "Stop" else "Play",
+                                        tint = if (isThisVoicePreviewing) Color(0xFFEF4444) else SaifTheme.colors.textPrimary,
+                                        modifier = Modifier.size(17.dp)
                                     )
                                 }
                             }

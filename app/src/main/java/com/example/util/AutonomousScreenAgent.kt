@@ -152,7 +152,13 @@ object AutonomousScreenAgent {
         for (step in plan.steps) {
             try {
                 if (step.spokenUpdate.isNotBlank()) {
+                    try {
+                        com.example.utils.TTSManager.speak(step.spokenUpdate, context)
+                    } catch (e: Exception) {
+                        Log.w(TAG, "TTS speak failed for step update: ${e.message}")
+                    }
                     onProgress?.invoke(step, step.spokenUpdate)
+                    delay(600L)
                 }
 
                 val status = executeSingleStep(context, step, service)
@@ -212,6 +218,12 @@ object AutonomousScreenAgent {
                     DeviceActionManager.searchYouTube(context, step.payload)
                     "YouTube search khol diya."
                 }
+            }
+
+            "PLAY_STORE_SEARCH" -> {
+                val query = step.payload.ifBlank { step.target }
+                DeviceActionManager.searchPlayStore(context, query)
+                "Play Store par '$query' search kar diya hai sir."
             }
 
             "CLICK_VIDEO" -> {
@@ -320,6 +332,10 @@ object AutonomousScreenAgent {
                 "Waited ${ms}ms."
             }
 
+            "INSPECT_SCREEN" -> {
+                DeviceActionManager.inspectCurrentScreen(context)
+            }
+
             "SPEAK" -> {
                 step.spokenUpdate
             }
@@ -395,21 +411,45 @@ object AutonomousScreenAgent {
             return steps
         }
 
-        // 2. YouTube Search Bar / Continue Search: "ab koi song search karo search bar kholo"
-        if ((lower.contains("search bar") || lower.contains("search kholo") || (lower.contains("search karo") && !lower.contains("play"))) &&
-            (lower.contains("song") || lower.contains("gana") || lower.contains("video") || lower.contains("kholo") || lower.contains("open"))) {
-            val q = userGoal.replace(Regex("""(?i)\b(ab|koi|song|search|bar|kholo|open|karo|par|pe|me|aur|fir)\b"""), " ").trim()
+        // 2. YouTube Search Bar / Continue Search: "ab koi song search karo search bar kholo" / "search button dabao"
+        if ((lower.contains("search bar") || lower.contains("search kholo") || lower.contains("search button") || (lower.contains("search karo") && !lower.contains("play"))) &&
+            (lower.contains("song") || lower.contains("gana") || lower.contains("video") || lower.contains("kholo") || lower.contains("open") || lower.contains("dabao"))) {
+            val q = userGoal.replace(Regex("""(?i)\b(ab|koi|song|search|bar|button|kholo|open|dabao|daba|karo|par|pe|me|aur|fir|then)\b"""), " ").trim()
             steps.add(AutonomousStep(1, "Open Search Bar", "YOUTUBE_OPEN_SEARCH", payload = q, spokenUpdate = "Search bar open kar raha hoon..."))
             return steps
         }
 
-        // 3. YouTube Play first video: "youtube par song search kar ke pahele wali video ko play kar do"
+        // 3. Play Store Multi-Step: "Open Play Store, Search BGMI & Install"
+        if (lower.contains("play store") || lower.contains("playstore") || lower.contains("google play") || (lower.contains("store") && lower.contains("search"))) {
+            var appQuery = userGoal.replace(Regex("""(?i)\b(open|kholo|play\s*store|playstore|google\s*play|store|par|pe|me|and|aur|fir|then|search|dhoondo|install|download|karo|banao|app|game|ko|kar|do|karke|ek|koi)\b"""), " ").trim()
+            if (appQuery.isBlank()) {
+                appQuery = "BGMI"
+            }
+            steps.add(AutonomousStep(1, "Open Play Store", "LAUNCH_APP", target = "playstore", spokenUpdate = "Play Store open kar raha hoon sir..."))
+            steps.add(AutonomousStep(2, "Search on Play Store", "PLAY_STORE_SEARCH", payload = appQuery, spokenUpdate = "Play Store par '$appQuery' search kar raha hoon sir..."))
+            if (lower.contains("install") || lower.contains("download")) {
+                steps.add(AutonomousStep(3, "Tap Install", "CLICK_TEXT", target = "Install", spokenUpdate = "Install par tap kiya..."))
+            }
+            return steps
+        }
+
+        // 4. YouTube Multi-Step: "youtube open karo aur song search kar ke paheli video play kar do"
         if (lower.contains("youtube") && (lower.contains("play") || lower.contains("search") || lower.contains("chalao") || lower.contains("gana") || lower.contains("song") || lower.contains("video"))) {
-            var query = userGoal.replace(Regex("""(?i)\b(open|kholo|youtube|par|pe|me|and|aur|fir|then|search|play|chalao|gana|song|karo|banao|pahele|pehli|pehla|wali|video|ko|kar|do|karke)\b"""), " ").trim()
-            if (query.isBlank() || query == "video" || query == "song") {
+            var query = userGoal.replace(Regex("""(?i)\b(open|kholo|youtube|par|pe|me|and|aur|fir|then|search|play|chalao|gana|song|karo|banao|pahele|pehli|pehla|wali|video|ko|kar|do|karke|ek|koi)\b"""), " ").trim()
+            if (query.isBlank() || query == "video" || query == "song" || query == "gana") {
                 query = "latest trending song"
             }
-            steps.add(AutonomousStep(1, "Play Video on YouTube", "YOUTUBE_PLAY", payload = query, spokenUpdate = "YouTube par '$query' search karke pehla video play kar raha hoon sir..."))
+            steps.add(AutonomousStep(1, "Open YouTube", "LAUNCH_APP", target = "youtube", spokenUpdate = "Main YouTube khol raha hoon sir..."))
+            steps.add(AutonomousStep(2, "Search on YouTube", "YOUTUBE_OPEN_SEARCH", payload = query, spokenUpdate = "YouTube par '$query' search kar raha hoon sir..."))
+            if (lower.contains("play") || lower.contains("chalao") || lower.contains("pehli") || lower.contains("pahele") || lower.contains("video")) {
+                steps.add(AutonomousStep(3, "Play Video", "CLICK_VIDEO", spokenUpdate = "Pehli video play kar raha hoon sir..."))
+            }
+            if (lower.contains("scroll")) {
+                steps.add(AutonomousStep(steps.size + 1, "Scroll Down", "SCROLL", payload = "down", spokenUpdate = "Screen scroll kar raha hoon..."))
+            }
+            if (lower.contains("subscribe")) {
+                steps.add(AutonomousStep(steps.size + 1, "Subscribe Channel", "YOUTUBE_SUBSCRIBE", spokenUpdate = "Channel subscribe kar raha hoon sir..."))
+            }
             return steps
         }
 
@@ -424,29 +464,40 @@ object AutonomousScreenAgent {
             return steps
         }
 
-        // 5. WhatsApp: "watsapp par kisi ko hi likh kar bhejo"
-        if (lower.contains("whatsapp") || lower.contains("watsapp")) {
+        // 5. WhatsApp: "watsaap kholo lucky2 ko hii likh kar bhejo" / "watsapp par kisi ko hi likh kar bhejo"
+        if (lower.contains("whatsapp") || lower.contains("watsapp") || lower.contains("whats app")) {
             var recipient = ""
             var message = "Hii"
 
-            val recipientMatch = Regex("""(?i)\b(?:to|ko|par)\s+([A-Za-z0-9_\u0900-\u097F]+)""").find(userGoal)
-            if (recipientMatch != null) {
-                recipient = recipientMatch.groupValues[1]
+            val contactMatch = Regex("""(?i)\b([a-zA-Z0-9_\u0900-\u097F]+)\s*ko\b""").find(userGoal)
+                ?: Regex("""(?i)\b(?:to|par)\s+([a-zA-Z0-9_\u0900-\u097F]+)""").find(userGoal)
+            if (contactMatch != null) {
+                recipient = contactMatch.groupValues[1].trim()
+            }
+            if (recipient.lowercase() in listOf("whatsapp", "watsapp", "kisi", "kisi ko", "karo", "do")) {
+                recipient = if (recipient.lowercase() == "kisi" || recipient.lowercase() == "kisi ko") "kisi ko" else ""
             }
 
-            if (lower.contains("hii") || lower.contains("hi")) message = "Hii"
-            else if (lower.contains("hello")) message = "Hello"
-            else {
-                val msgMatch = Regex("""['"]([^'"]+)['"]""").find(userGoal)
-                if (msgMatch != null) {
-                    message = msgMatch.groupValues[1]
-                } else if (lower.contains("likh") || lower.contains("type") || lower.contains("bhejo")) {
-                    val ext = userGoal.substringAfter("likh", userGoal.substringAfter("bhejo", "")).trim()
-                    if (ext.isNotBlank()) message = ext
+            when {
+                lower.contains("hii") || lower.contains("hi") -> message = "Hii"
+                lower.contains("hello") -> message = "Hello"
+                else -> {
+                    val msgMatch = Regex("""['"]([^'"]+)['"]""").find(userGoal)
+                    if (msgMatch != null) {
+                        message = msgMatch.groupValues[1].trim()
+                    } else if (lower.contains("likh") || lower.contains("type") || lower.contains("bhejo") || lower.contains("send")) {
+                        val beforeLikh = userGoal.substringBefore("likh", userGoal.substringBefore("bhejo", ""))
+                        val afterKo = beforeLikh.substringAfter("ko", "").trim()
+                        if (afterKo.isNotBlank() && !afterKo.contains("whatsapp", ignoreCase = true)) {
+                            message = afterKo
+                        }
+                    }
                 }
             }
 
-            steps.add(AutonomousStep(1, "Send WhatsApp Message", "WHATSAPP_SEND", target = recipient, payload = message, spokenUpdate = "WhatsApp par message bhej raha hoon sir..."))
+            val targetLabel = if (recipient.isNotBlank() && recipient != "kisi ko") recipient else "contact"
+            steps.add(AutonomousStep(1, "Open WhatsApp", "LAUNCH_APP", target = "whatsapp", spokenUpdate = "Main WhatsApp khol raha hoon sir..."))
+            steps.add(AutonomousStep(2, "Send WhatsApp Message", "WHATSAPP_SEND", target = recipient, payload = message, spokenUpdate = "WhatsApp par $targetLabel ko '$message' bhej raha hoon sir..."))
             return steps
         }
 
@@ -459,13 +510,25 @@ object AutonomousScreenAgent {
             return steps
         }
 
-        // 7. Home Navigation: "ab home screen par aao"
-        if (lower.contains("home screen") || lower.contains("home par") || lower.contains("main screen") || lower.contains("home aao") || lower == "home") {
+        // 7. Screen Inspection: "screen par kya hai", "screen dekho", "kya chal raha hai"
+        if (lower.contains("screen par kya") || lower.contains("screen dekho") || lower.contains("screen inspect") || lower.contains("kya chal raha hai") || lower.contains("screen check")) {
+            steps.add(AutonomousStep(1, "Inspect Screen", "INSPECT_SCREEN", spokenUpdate = "Screen check kar raha hoon sir..."))
+            return steps
+        }
+
+        // 8. Home Navigation: "ab home screen par aao", "home button dabao"
+        if (lower.contains("home screen") || lower.contains("home par") || lower.contains("main screen") || lower.contains("home aao") || lower.contains("home button") || lower == "home") {
             steps.add(AutonomousStep(1, "Go to Home Screen", "GLOBAL_NAV", target = "home", spokenUpdate = "Home screen par jaa rahe hain sir..."))
             return steps
         }
 
-        // 8. Scrolling: "scroll karo", "neeche scroll karo"
+        // 9. Back Navigation: "back button dabao", "ek baar back karo"
+        if (lower.contains("back button") || lower.contains("back karo") || lower.contains("ek baar back") || lower.contains("piche aao") || lower.contains("wapas aao") || lower == "back") {
+            steps.add(AutonomousStep(1, "Go Back", "GLOBAL_NAV", target = "back", spokenUpdate = "Back button daba rahe hain sir..."))
+            return steps
+        }
+
+        // 10. Scrolling: "scroll karo", "neeche scroll karo"
         if (lower.contains("scroll") || lower.contains("neeche karo") || lower.contains("upar karo") || lower.contains("neeche jao") || lower.contains("upar jao")) {
             val dir = if (lower.contains("up") || lower.contains("upar")) "up" else "down"
             steps.add(AutonomousStep(1, "Scroll Screen", "SCROLL", payload = dir, spokenUpdate = "Screen scroll kar raha hoon..."))

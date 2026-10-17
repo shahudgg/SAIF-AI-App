@@ -31,8 +31,9 @@ object TTSManager : TextToSpeech.OnInitListener {
         }
     }
 
-    private var onStartCallback: (() -> Unit)? = null
-    private var onDoneCallback: (() -> Unit)? = null
+    private val utteranceCallbacks = java.util.concurrent.ConcurrentHashMap<String, Pair<(() -> Unit)?, (() -> Unit)?>>()
+    private var lastAppliedVoiceId: String = ""
+    private var lastAppliedIsHindi: Boolean = false
 
     override fun onInit(status: Int) {
         if (status == TextToSpeech.SUCCESS) {
@@ -40,22 +41,34 @@ object TTSManager : TextToSpeech.OnInitListener {
             tts?.setOnUtteranceProgressListener(object : android.speech.tts.UtteranceProgressListener() {
                 override fun onStart(utteranceId: String?) {
                     _isSpeaking.value = true
-                    onStartCallback?.invoke()
+                    if (utteranceId != null) {
+                        utteranceCallbacks[utteranceId]?.first?.invoke()
+                    }
                 }
                 override fun onDone(utteranceId: String?) {
-                    _isSpeaking.value = false
                     _currentlySpeakingText.value = null
-                    onDoneCallback?.invoke()
+                    if (utteranceId != null) {
+                        val cb = utteranceCallbacks.remove(utteranceId)?.second
+                        cb?.invoke()
+                    }
+                    if (utteranceCallbacks.isEmpty()) {
+                        _isSpeaking.value = false
+                    }
                 }
                 override fun onError(utteranceId: String?) {
-                    _isSpeaking.value = false
                     _currentlySpeakingText.value = null
-                    onDoneCallback?.invoke()
+                    if (utteranceId != null) {
+                        val cb = utteranceCallbacks.remove(utteranceId)?.second
+                        cb?.invoke()
+                    }
+                    if (utteranceCallbacks.isEmpty()) {
+                        _isSpeaking.value = false
+                    }
                 }
             })
             queuedText?.let { text ->
                 queuedContext?.let { ctx ->
-                    speak(text, ctx, onStartCallback, onDoneCallback)
+                    speak(text, ctx)
                 }
                 queuedText = null
                 queuedContext = null
@@ -65,16 +78,69 @@ object TTSManager : TextToSpeech.OnInitListener {
         }
     }
 
-    fun applyProfile(profile: VoiceProfile) {
-        tts?.stop()
-        
-        // Ensure language is set before setting voice as some devices reset voice when language changes
-        tts?.language = Locale.Builder().setLanguage("en").setRegion("IN").build()
+    fun isHinglishOrHindi(text: String): Boolean {
+        if (text.any { it in '\u0900'..'\u097F' }) return true
+        val lower = text.lowercase()
+        val hinglishKeywords = hashSetOf(
+            "aap", "aapka", "aapki", "aapke", "aapse", "mai", "main", "mera", "meri", "mere",
+            "hum", "humara", "humari", "kaise", "kaisa", "kaisi", "kya", "kyun", "kyu",
+            "kab", "kahan", "kidhar", "kaun", "kis", "kisi", "bilkul", "theek", "thik",
+            "accha", "achha", "achhi", "achhe", "baat", "karenge", "karein", "karo", "karna",
+            "batao", "bataiye", "btaiye", "suno", "bolo", "samjho", "samajh", "pata",
+            "nahi", "nhi", "haan", "han", "bahut", "bhot", "bohot", "yaar", "yar", "bhai",
+            "dost", "madad", "shukriya", "namaste", "namaskar", "aaj", "kal", "abhi",
+            "thoda", "zyada", "chahiye", "hoga", "hogi", "honge", "hai", "hain", "hoon",
+            "tha", "thi", "the", "wala", "wali", "wale", "dekho", "dekhiye",
+            "chal", "raha", "rahi", "rahe", "gaya", "gayi", "gaye", "bana", "banao", "kariye"
+        )
+        val tokens = lower.split(Regex("[^a-z0-9]+"))
+        return tokens.any { it in hinglishKeywords }
+    }
 
+    fun applyProfile(
+        profile: VoiceProfile,
+        isHinglish: Boolean = false,
+        hasDevanagari: Boolean = false,
+        hasExcitement: Boolean = false
+    ) {
+        lastAppliedVoiceId = profile.id
+        lastAppliedIsHindi = isHinglish || hasDevanagari
+
+        // 1. Configure Language / Locale
+        if (hasDevanagari) {
+            val hiLocale = Locale("hi", "IN")
+            val langAvailable = tts?.isLanguageAvailable(hiLocale)
+            if (langAvailable != TextToSpeech.LANG_MISSING_DATA && langAvailable != TextToSpeech.LANG_NOT_SUPPORTED) {
+                tts?.language = hiLocale
+            } else {
+                tts?.language = Locale.Builder().setLanguage("en").setRegion("IN").build()
+            }
+        } else if (isHinglish) {
+            // For Romanized Hinglish, Indian English locale provides the smoothest phonetic pronunciation without stuttering
+            val enInLocale = Locale.Builder().setLanguage("en").setRegion("IN").build()
+            val avail = tts?.isLanguageAvailable(enInLocale)
+            if (avail != TextToSpeech.LANG_MISSING_DATA && avail != TextToSpeech.LANG_NOT_SUPPORTED) {
+                tts?.language = enInLocale
+            } else {
+                tts?.language = Locale("hi", "IN")
+            }
+        } else {
+            val enInLocale = Locale.Builder().setLanguage("en").setRegion("IN").build()
+            val avail = tts?.isLanguageAvailable(enInLocale)
+            if (avail != TextToSpeech.LANG_MISSING_DATA && avail != TextToSpeech.LANG_NOT_SUPPORTED) {
+                tts?.language = enInLocale
+            } else {
+                tts?.language = Locale.US
+            }
+        }
+
+        // 2. Select optimal voice matching profile target, accent, and gender
         val voices = tts?.voices
-        if (voices != null) {
+        if (voices != null && voices.isNotEmpty()) {
             var selectedVoice: android.speech.tts.Voice? = null
-            // Check targets in order of preference
+            val isMale = profile.gender.equals("Male", ignoreCase = true)
+
+            // Step A: Check profile preferred matches
             for (target in profile.targetEngineNameMatches) {
                 val match = voices.find { it.name.equals(target, ignoreCase = true) }
                 if (match != null) {
@@ -82,22 +148,56 @@ object TTSManager : TextToSpeech.OnInitListener {
                     break
                 }
             }
-            // Fallback: try partial matching if exact matches fail
+
+            // Step B: Partial match from targets
             if (selectedVoice == null) {
-                val fallbackTarget = profile.targetEngineNameMatches.firstOrNull() ?: ""
-                selectedVoice = voices.find { it.name.contains(fallbackTarget, ignoreCase = true) }
+                for (target in profile.targetEngineNameMatches) {
+                    val match = voices.find { it.name.contains(target, ignoreCase = true) }
+                    if (match != null) {
+                        selectedVoice = match
+                        break
+                    }
+                }
             }
-            
+
+            // Step C: If Hinglish, find Indian English or Hindi voice with matching gender
+            if (selectedVoice == null && isHinglish) {
+                selectedVoice = voices.filter { v ->
+                    val n = v.name.lowercase()
+                    (n.contains("en-in") || n.contains("en_in") || n.contains("hi-in") || n.contains("hi_in")) &&
+                    if (isMale) (n.contains("male") || n.contains("ene") || n.contains("hia"))
+                    else (n.contains("female") || n.contains("cxx") || n.contains("hic"))
+                }.maxByOrNull { if (it.isNetworkConnectionRequired) 0 else 1 }
+            }
+
+            // Step D: Any voice matching gender
+            if (selectedVoice == null) {
+                selectedVoice = voices.find { v ->
+                    val n = v.name.lowercase()
+                    if (isMale) n.contains("male") else n.contains("female")
+                }
+            }
+
             if (selectedVoice != null) {
-                tts?.voice = selectedVoice
-                Log.d("TTSManager", "Applied voice: ${selectedVoice.name}")
-            } else {
-                Log.d("TTSManager", "No exact voice matched for profile: ${profile.name}. Using default with adjusted pitch.")
+                try {
+                    tts?.voice = selectedVoice
+                    Log.d("TTSManager", "Applied voice: ${selectedVoice.name} (Hinglish: $isHinglish)")
+                } catch (e: Exception) {
+                    Log.w("TTSManager", "Error setting voice: ${e.message}")
+                }
             }
         }
-        
-        tts?.setPitch(profile.pitch)
-        tts?.setSpeechRate(profile.speechRate)
+
+        // 3. Emotional dynamic pitch & speed rate
+        val emotionalPitch = if (hasExcitement) {
+            (profile.pitch * 1.05f).coerceIn(0.70f, 1.30f)
+        } else {
+            profile.pitch
+        }
+        val smoothRate = profile.speechRate.coerceIn(0.90f, 1.08f)
+
+        tts?.setPitch(emotionalPitch)
+        tts?.setSpeechRate(smoothRate)
     }
 
     fun previewVoice(context: Context, text: String, voiceId: String) {
@@ -105,26 +205,48 @@ object TTSManager : TextToSpeech.OnInitListener {
             init(context)
             return
         }
+        val clean = cleanTextForSpeech(text)
+        val hasDevanagari = clean.any { it in '\u0900'..'\u097F' }
+        val isHinglish = isHinglishOrHindi(clean)
+        val hasExcitement = clean.contains("!") || clean.contains("Bilkul", ignoreCase = true)
+
         val profile = VOICE_PROFILES.find { it.id == voiceId } ?: VOICE_PROFILES.first()
-        applyProfile(profile)
-        val params = android.os.Bundle().apply { putString(TextToSpeech.Engine.KEY_PARAM_UTTERANCE_ID, "preview_id") }
-        tts?.speak(text, TextToSpeech.QUEUE_FLUSH, params, "preview_id")
+        applyProfile(profile, isHinglish = isHinglish, hasDevanagari = hasDevanagari, hasExcitement = hasExcitement)
+
+        _currentlySpeakingText.value = text
+        val utteranceId = "preview_id_${System.currentTimeMillis()}"
+        val params = android.os.Bundle().apply { putString(TextToSpeech.Engine.KEY_PARAM_UTTERANCE_ID, utteranceId) }
+        tts?.speak(clean, TextToSpeech.QUEUE_FLUSH, params, utteranceId)
     }
 
     fun speak(text: String, context: Context, onStart: (() -> Unit)? = null, onDone: (() -> Unit)? = null) {
-        if (onStart != null) onStartCallback = onStart
-        if (onDone != null) onDoneCallback = onDone
+        speakInternal(text, context, queueMode = TextToSpeech.QUEUE_FLUSH, onStart, onDone)
+    }
 
+    fun speakQueued(text: String, context: Context, onStart: (() -> Unit)? = null, onDone: (() -> Unit)? = null) {
+        speakInternal(text, context, queueMode = TextToSpeech.QUEUE_ADD, onStart, onDone)
+    }
+
+    private fun speakInternal(
+        text: String,
+        context: Context,
+        queueMode: Int = TextToSpeech.QUEUE_FLUSH,
+        onStart: (() -> Unit)? = null,
+        onDone: (() -> Unit)? = null
+    ) {
         val cleanText = cleanTextForSpeech(text)
         if (cleanText.isBlank()) {
             _currentlySpeakingText.value = null
-            val cb = onDoneCallback
-            onDoneCallback = null
-            cb?.invoke()
+            onDone?.invoke()
             return
         }
 
         _currentlySpeakingText.value = text
+
+        val utteranceId = "LIVE_SPEECH_${System.currentTimeMillis()}_${cleanText.hashCode()}"
+        if (onStart != null || onDone != null) {
+            utteranceCallbacks[utteranceId] = Pair(onStart, onDone)
+        }
 
         if (!isReady) {
             queuedText = cleanText
@@ -138,11 +260,26 @@ object TTSManager : TextToSpeech.OnInitListener {
         val prefs = context.getSharedPreferences("VoiceSettings", Context.MODE_PRIVATE)
         val selectedVoiceId = prefs.getString("selected_voice_id", "Zephyr") ?: "Zephyr"
 
+        val hasDevanagari = cleanText.any { it in '\u0900'..'\u097F' }
+        val isHinglish = isHinglishOrHindi(cleanText)
+        val hasExcitement = cleanText.contains("!") || cleanText.contains("Bilkul", ignoreCase = true) || cleanText.contains("Super", ignoreCase = true)
         val profile = VOICE_PROFILES.find { it.id == selectedVoiceId } ?: VOICE_PROFILES.first()
-        applyProfile(profile)
+        
+        applyProfile(profile, isHinglish = isHinglish, hasDevanagari = hasDevanagari, hasExcitement = hasExcitement)
 
-        val params = android.os.Bundle().apply { putString(TextToSpeech.Engine.KEY_PARAM_UTTERANCE_ID, "LIVE_SPEECH_ID") }
-        tts?.speak(cleanText, TextToSpeech.QUEUE_FLUSH, params, "LIVE_SPEECH_ID")
+        val params = android.os.Bundle().apply { putString(TextToSpeech.Engine.KEY_PARAM_UTTERANCE_ID, utteranceId) }
+        tts?.speak(cleanText, queueMode, params, utteranceId)
+    }
+
+    fun stop() {
+        _isSpeaking.value = false
+        _currentlySpeakingText.value = null
+        utteranceCallbacks.clear()
+        try {
+            tts?.stop()
+        } catch (e: Exception) {
+            Log.w("TTSManager", "Error stopping TTS: ${e.message}")
+        }
     }
 
     /**
@@ -161,8 +298,13 @@ object TTSManager : TextToSpeech.OnInitListener {
 
         var text = rawText
 
-        // Guard: If raw text is a source code file (starts with package, import, class, etc.), do not read code
+        // Guard: If raw text is an API error message, speak a brief user-friendly notification
         val trimmed = text.trimStart()
+        if (trimmed.startsWith("❌") || trimmed.contains("**API Error:**", ignoreCase = true) || trimmed.contains("API Error: All configured attempts failed", ignoreCase = true)) {
+            return "API connection me dikkat aayi hai. Kripya Settings me API key check karein."
+        }
+
+        // Guard: If raw text is a source code file (starts with package, import, class, etc.), do not read code
         if (trimmed.startsWith("package ") || trimmed.startsWith("import ") ||
             trimmed.startsWith("class ") || trimmed.startsWith("fun ") ||
             trimmed.startsWith("public class ") || trimmed.startsWith("<!DOCTYPE") ||
@@ -219,14 +361,62 @@ object TTSManager : TextToSpeech.OnInitListener {
         text = text.replace(Regex("""\s+"""), " ")
         text = text.replace(Regex("""\s+([,.:;!?])"""), "$1").trim()
 
-        // 12. If text became empty because it was only an image link, provide friendly confirmation
-        if (text.isBlank() || text.matches(Regex("""^[\s.,!?:;-]*$"""))) {
-            return if (hasImageMarkdown) {
-                "Maine aapke liye image generate kar di hai."
-            } else {
-                ""
-            }
+        // 13. Smooth Hinglish phonetics and collapse stuttering characters
+        text = smoothTextForHinglish(text)
+
+        return text
+    }
+
+    /**
+     * Smooths phonetic clusters and chat shorthand for natural, stutter-free Hinglish delivery
+     */
+    fun smoothTextForHinglish(rawText: String): String {
+        var text = rawText
+
+        // 1. Collapse 3+ repeated characters (e.g. hrrllloo -> hello, sooooo -> soo, kyyyya -> kya)
+        text = text.replace(Regex("""([a-zA-Z])\1{2,}""")) { match ->
+            val ch = match.value[0]
+            "$ch$ch"
         }
+
+        // 2. Normalize chat shorthand to phonetically clear, smooth words that TTS pronounces without hesitation
+        val replacements = listOf(
+            Regex("""\bhr+l+o+\b""", RegexOption.IGNORE_CASE) to "hello",
+            Regex("""\bbtaiye\b""", RegexOption.IGNORE_CASE) to "bataiye",
+            Regex("""\bbtao\b""", RegexOption.IGNORE_CASE) to "batao",
+            Regex("""\bnhi\b""", RegexOption.IGNORE_CASE) to "nahi",
+            Regex("""\bbhot\b""", RegexOption.IGNORE_CASE) to "bahut",
+            Regex("""\bbohot\b""", RegexOption.IGNORE_CASE) to "bahut",
+            Regex("""\bkro\b""", RegexOption.IGNORE_CASE) to "karo",
+            Regex("""\bkrein\b""", RegexOption.IGNORE_CASE) to "karein",
+            Regex("""\bkr\b""", RegexOption.IGNORE_CASE) to "kar",
+            Regex("""\byrr+\b""", RegexOption.IGNORE_CASE) to "yaar",
+            Regex("""\bplz\b""", RegexOption.IGNORE_CASE) to "please",
+            Regex("""\bpls\b""", RegexOption.IGNORE_CASE) to "please",
+            Regex("""\bthnx\b""", RegexOption.IGNORE_CASE) to "thanks",
+            Regex("""\bthx\b""", RegexOption.IGNORE_CASE) to "thanks",
+            Regex("""\bkyu\b""", RegexOption.IGNORE_CASE) to "kyon",
+            Regex("""\bkyun\b""", RegexOption.IGNORE_CASE) to "kyon",
+            Regex("""\bacha\b""", RegexOption.IGNORE_CASE) to "achha",
+            Regex("""\bthk\b""", RegexOption.IGNORE_CASE) to "theek",
+            Regex("""\bsb\b""", RegexOption.IGNORE_CASE) to "sab",
+            Regex("""\bhnn\b""", RegexOption.IGNORE_CASE) to "haan",
+            Regex("""\bhn\b""", RegexOption.IGNORE_CASE) to "haan",
+            Regex("""\bapka\b""", RegexOption.IGNORE_CASE) to "aapka",
+            Regex("""\bapki\b""", RegexOption.IGNORE_CASE) to "aapki"
+        )
+        for ((regex, replacement) in replacements) {
+            text = text.replace(regex, replacement)
+        }
+
+        // 3. Convert multi-dots or stutter punctuation into smooth breathing comma pauses
+        text = text.replace(Regex("""\.\.\.+"""), ", ")
+        text = text.replace(Regex("""\?\?+"""), "? ")
+        text = text.replace(Regex("""!!+"""), "! ")
+
+        // 4. Ensure comma and periods have a trailing space for natural breath pauses
+        text = text.replace(Regex("""([,.:;!?])(?=[a-zA-Z0-9])"""), "$1 ")
+        text = text.replace(Regex("""\s+"""), " ").trim()
 
         return text
     }
@@ -287,18 +477,6 @@ object TTSManager : TextToSpeech.OnInitListener {
         }
     }
 
-    fun stop() {
-        _isSpeaking.value = false
-        _currentlySpeakingText.value = null
-        onStartCallback = null
-        onDoneCallback = null
-        try {
-            tts?.stop()
-        } catch (e: Exception) {
-            Log.w("TTSManager", "Error stopping TTS: ${e.message}")
-        }
-    }
-    
     fun shutdown() {
         stop()
         tts?.shutdown()

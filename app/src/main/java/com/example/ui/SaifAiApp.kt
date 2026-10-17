@@ -41,6 +41,7 @@ import android.net.Uri
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Code
 import androidx.compose.ui.text.font.FontWeight
@@ -78,6 +79,59 @@ fun SaifAiApp(
     var showConfigureDialog by remember { mutableStateOf(false) }
     var activeProjectData by remember { mutableStateOf<com.example.ui.components.ProjectData?>(null) }
     var showProjectEditor by remember { mutableStateOf(false) }
+
+    // Video Project Timeline Studio states
+    var showVideoProjectDialog by remember { mutableStateOf(false) }
+    var activeVideoProjectData by remember { mutableStateOf<com.example.ui.components.VideoProjectData?>(null) }
+    var showVideoStudio by remember { mutableStateOf(false) }
+    var pendingVideoProjectName by remember { mutableStateOf("Cyberpunk Tokyo Vlog") }
+
+    val pendingOpenVideoProject by viewModel.pendingOpenVideoProject.collectAsStateWithLifecycle()
+    LaunchedEffect(pendingOpenVideoProject) {
+        pendingOpenVideoProject?.let { proj ->
+            activeVideoProjectData = proj
+            showVideoStudio = true
+            viewModel.consumePendingVideoProject()
+        }
+    }
+
+    // Multi-media gallery picker for 50+ video & photos
+    val videoProjectMediaPicker = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.PickMultipleVisualMedia(100)
+    ) { uris: List<Uri> ->
+        val clips = if (uris.isNotEmpty()) {
+            uris.mapIndexed { idx, uri ->
+                val name = uri.lastPathSegment?.substringAfterLast('/')?.take(18) ?: "Clip_${idx + 1}"
+                com.example.ui.components.TimelineMediaClip(
+                    name = name,
+                    uri = uri,
+                    durationSeconds = 8.0f,
+                    isAiEnhanced = false,
+                    isPhoto = false
+                )
+            }
+        } else {
+            // Default sample clips if user canceled gallery selection
+            listOf(
+                com.example.ui.components.TimelineMediaClip(name = "Intro.mp4", durationSeconds = 6.0f),
+                com.example.ui.components.TimelineMediaClip(name = "Shibuya_Rain.mp4", durationSeconds = 15.2f, isAiEnhanced = true),
+                com.example.ui.components.TimelineMediaClip(name = "Night.mp4", durationSeconds = 18.0f)
+            )
+        }
+
+        val videoProj = com.example.ui.components.VideoProjectData(
+            projectName = pendingVideoProjectName.ifBlank { "Cyberpunk Tokyo Vlog" },
+            clips = clips
+        )
+        activeVideoProjectData = videoProj
+        showVideoStudio = true
+        viewModel.createVideoProjectSession(videoProj, context)
+        android.widget.Toast.makeText(
+            context,
+            "Loaded ${clips.size} clips into Timeline Studio!",
+            android.widget.Toast.LENGTH_SHORT
+        ).show()
+    }
     val displayedMessages = if (isFilterBookmarked) bookmarkedMessages else activeMessages
     // Auto-scroll on new messages or during active streaming
     LaunchedEffect(displayedMessages.size, currentStreamingContent.length) {
@@ -170,8 +224,14 @@ fun SaifAiApp(
                     onSelectSession = { id ->
                         viewModel.selectSession(id)
                         val target = allSessions.firstOrNull { it.id == id }
+                        val isVideoProj = target != null && (target.mode == "video_project" || com.example.util.ProjectDataManager.hasVideoProject(context, target.title))
                         val isProj = target != null && (target.mode == "project" || com.example.util.ProjectDataManager.hasProject(context, target.title))
-                        if (isProj) {
+                        if (isVideoProj) {
+                            val savedVideo = com.example.util.ProjectDataManager.getVideoProject(context, target!!.title)
+                                ?: com.example.ui.components.VideoProjectData(projectName = target.title)
+                            activeVideoProjectData = savedVideo
+                            showVideoStudio = true
+                        } else if (isProj) {
                             val savedProj = com.example.util.ProjectDataManager.getProject(context, target!!.title)
                                 ?: com.example.ui.components.ProjectData(
                                     appName = target.title,
@@ -191,7 +251,7 @@ fun SaifAiApp(
                         viewModel.createNewSession()
                         scope.launch { drawerState.close() }
                     },
-                    onRenameSession = { id, title -> viewModel.renameSession(id, title) },
+                    onRenameSession = { id, title -> viewModel.renameSession(id, title, context) },
                     onDeleteSession = { id -> viewModel.deleteSession(id, context) },
                     onClearAll = {
                         viewModel.clearAllSessions()
@@ -216,6 +276,7 @@ fun SaifAiApp(
                         onNewChat = { viewModel.createNewSession() },
                         onOpenSettings = { showSettings = true },
                         onPlusClick = { showConfigureDialog = true },
+                        onNewVideoProjectClick = { showVideoProjectDialog = true },
                         isFilterBookmarked = isFilterBookmarked,
                         onToggleBookmarkFilter = { viewModel.toggleBookmarkFilter() },
                         onUpgradeClick = { showUpgradeDialog = true },
@@ -702,6 +763,110 @@ fun SaifAiApp(
                             viewModel.renameSession(currId, updated.appName)
                         }
                     }
+                )
+            }
+        }
+
+        // Video Project Creation Choice Dialog (With Video / Without Video)
+        if (showVideoProjectDialog) {
+            com.example.ui.components.VideoProjectCreateDialog(
+                isDarkTheme = !isLightMode,
+                onDismiss = { showVideoProjectDialog = false },
+                onSelectWithMedia = { projectName ->
+                    showVideoProjectDialog = false
+                    pendingVideoProjectName = projectName
+                    try {
+                        videoProjectMediaPicker.launch(
+                            androidx.activity.result.PickVisualMediaRequest(
+                                androidx.activity.result.contract.ActivityResultContracts.PickVisualMedia.ImageAndVideo
+                            )
+                        )
+                    } catch (e: Exception) {
+                        // Fallback to standard timeline
+                        val fallbackProj = com.example.ui.components.VideoProjectData(
+                            projectName = projectName
+                        )
+                        activeVideoProjectData = fallbackProj
+                        showVideoStudio = true
+                        viewModel.createVideoProjectSession(fallbackProj, context)
+                    }
+                },
+                onSelectWithoutMedia = { projectName ->
+                    showVideoProjectDialog = false
+                    val blankProj = com.example.ui.components.VideoProjectData(
+                        projectName = projectName,
+                        clips = emptyList()
+                    )
+                    activeVideoProjectData = blankProj
+                    showVideoStudio = true
+                    viewModel.createVideoProjectSession(blankProj, context)
+                    android.widget.Toast.makeText(
+                        context,
+                        "Opened blank timeline canvas",
+                        android.widget.Toast.LENGTH_SHORT
+                    ).show()
+                },
+                onOpenProject = { projectName ->
+                    showVideoProjectDialog = false
+                    val existing = com.example.util.ProjectDataManager.getVideoProject(context, projectName)
+                        ?: com.example.ui.components.VideoProjectData(projectName = projectName)
+                    activeVideoProjectData = existing
+                    showVideoStudio = true
+                    viewModel.createVideoProjectSession(existing, context)
+                },
+                onCreateFromPrompt = { userPrompt ->
+                    showVideoProjectDialog = false
+                    android.widget.Toast.makeText(
+                        context,
+                        "🎬 Researching & synthesizing: '$userPrompt'...",
+                        android.widget.Toast.LENGTH_SHORT
+                    ).show()
+                    scope.launch {
+                        val result = com.example.ui.components.SaifAiEditingEngine.generateAutonomousDirectorEdl(
+                            context = context,
+                            prompt = userPrompt,
+                            rawVideoUrl = null
+                        )
+                        result.onSuccess { (_, proj) ->
+                            activeVideoProjectData = proj
+                            showVideoStudio = true
+                            viewModel.createVideoProjectSession(proj, context)
+                            android.widget.Toast.makeText(
+                                context,
+                                "✅ Video assembled from prompt!",
+                                android.widget.Toast.LENGTH_SHORT
+                            ).show()
+                        }.onFailure { err ->
+                            android.widget.Toast.makeText(
+                                context,
+                                "Generation error: ${err.message}",
+                                android.widget.Toast.LENGTH_LONG
+                            ).show()
+                        }
+                    }
+                }
+            )
+        }
+
+        // Fullscreen Video Timeline Studio Screen (with SAIF AI EDITING chat & Export studio)
+        AnimatedVisibility(
+            visible = showVideoStudio && activeVideoProjectData != null,
+            enter = slideInVertically(
+                initialOffsetY = { it },
+                animationSpec = spring(
+                    dampingRatio = Spring.DampingRatioLowBouncy,
+                    stiffness = Spring.StiffnessMediumLow
+                )
+            ) + fadeIn(tween(300)),
+            exit = slideOutVertically(
+                targetOffsetY = { it },
+                animationSpec = tween(250)
+            ) + fadeOut(tween(200))
+        ) {
+            activeVideoProjectData?.let { videoProject ->
+                com.example.ui.components.VideoTimelineStudioScreen(
+                    initialProject = videoProject,
+                    onClose = { showVideoStudio = false }
                 )
             }
         }

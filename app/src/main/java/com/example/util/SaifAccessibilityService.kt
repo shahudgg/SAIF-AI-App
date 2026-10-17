@@ -39,24 +39,31 @@ class SaifAccessibilityService : AccessibilityService() {
 
     companion object {
         private const val TAG = "SaifAccessibility"
-        private var serviceRef: WeakReference<SaifAccessibilityService>? = null
 
-        val instance: SaifAccessibilityService?
-            get() = serviceRef?.get()
+        @Volatile
+        var instance: SaifAccessibilityService? = null
+            private set
 
         fun isServiceEnabled(context: Context): Boolean {
+            if (instance != null) return true
+
             val expectedServiceName = "${context.packageName}/${SaifAccessibilityService::class.java.name}"
-            val enabledServices = Settings.Secure.getString(
-                context.contentResolver,
-                Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES
-            ) ?: return false
+            val enabledServices = try {
+                Settings.Secure.getString(
+                    context.contentResolver,
+                    Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES
+                )
+            } catch (e: Exception) {
+                null
+            } ?: return false
 
             val colonSplitter = TextUtils.SimpleStringSplitter(':')
             colonSplitter.setString(enabledServices)
             while (colonSplitter.hasNext()) {
                 val componentName = colonSplitter.next()
                 if (componentName.equals(expectedServiceName, ignoreCase = true) ||
-                    componentName.contains(context.packageName, ignoreCase = true)
+                    componentName.contains(context.packageName, ignoreCase = true) ||
+                    componentName.contains(SaifAccessibilityService::class.java.simpleName, ignoreCase = true)
                 ) {
                     return true
                 }
@@ -66,6 +73,13 @@ class SaifAccessibilityService : AccessibilityService() {
 
         fun openAccessibilitySettings(context: Context) {
             try {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU && !isServiceEnabled(context)) {
+                    android.widget.Toast.makeText(
+                        context,
+                        "Agar toggle grayed out ho, toh App Info me 3 dots se 'Allow restricted settings' enable karein.",
+                        android.widget.Toast.LENGTH_LONG
+                    ).show()
+                }
                 val intent = Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS).apply {
                     flags = Intent.FLAG_ACTIVITY_NEW_TASK
                 }
@@ -77,6 +91,10 @@ class SaifAccessibilityService : AccessibilityService() {
     }
 
     private var currentPackage: String = ""
+    var currentActivityClass: String = ""
+        private set
+    var currentWindowTitle: String = ""
+        private set
     var lastEventTime: Long = System.currentTimeMillis()
         private set
     var lastWindowChangeAt: Long = System.currentTimeMillis()
@@ -84,19 +102,31 @@ class SaifAccessibilityService : AccessibilityService() {
 
     override fun onServiceConnected() {
         super.onServiceConnected()
-        serviceRef = WeakReference(this)
+        instance = this
         Log.d(TAG, "SaifAccessibilityService connected successfully!")
     }
 
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
         if (event == null) return
-        lastEventTime = System.currentTimeMillis()
-        if (event.eventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED ||
-            event.eventType == AccessibilityEvent.TYPE_WINDOWS_CHANGED) {
-            lastWindowChangeAt = lastEventTime
-        }
-        event.packageName?.let {
-            currentPackage = it.toString()
+        try {
+            lastEventTime = System.currentTimeMillis()
+            val type = event.eventType
+            if (type == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED ||
+                type == AccessibilityEvent.TYPE_WINDOWS_CHANGED) {
+                lastWindowChangeAt = lastEventTime
+            }
+            if (type == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED) {
+                event.className?.let { currentActivityClass = it.toString() }
+                event.text?.let { if (it.isNotEmpty()) currentWindowTitle = it.joinToString(" ") }
+            }
+            event.packageName?.let {
+                val pkgName = it.toString()
+                if (pkgName.isNotBlank() && !pkgName.contains("inputmethod")) {
+                    currentPackage = pkgName
+                }
+            }
+        } catch (e: Throwable) {
+            Log.e(TAG, "Exception caught in onAccessibilityEvent: ${e.message}")
         }
     }
 
@@ -104,10 +134,17 @@ class SaifAccessibilityService : AccessibilityService() {
         Log.w(TAG, "SaifAccessibilityService interrupted")
     }
 
+    override fun onUnbind(intent: Intent?): Boolean {
+        if (instance === this) {
+            instance = null
+        }
+        return super.onUnbind(intent)
+    }
+
     override fun onDestroy() {
         super.onDestroy()
-        if (serviceRef?.get() == this) {
-            serviceRef = null
+        if (instance === this) {
+            instance = null
         }
         Log.d(TAG, "SaifAccessibilityService destroyed")
     }
@@ -188,14 +225,28 @@ class SaifAccessibilityService : AccessibilityService() {
             val action = if (forward) AccessibilityNodeInfo.ACTION_SCROLL_FORWARD else AccessibilityNodeInfo.ACTION_SCROLL_BACKWARD
             val scrollableNode = findFirstScrollableNode(root)
             scrollableNode?.performAction(action)
-            scrollableNode?.recycle()
-            root.recycle()
         }
 
         return gestureScrolled
     }
 
     // ==================== HUMAN TOUCH & PHYSICAL GESTURES ====================
+
+    /**
+     * Dispatches an awaited real human physical finger tap at (x, y) coordinates.
+     */
+    suspend fun performHumanTapAwait(x: Float, y: Float, durationMs: Long = 80L): Boolean {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.N) return false
+        return try {
+            val path = Path().apply { moveTo(x, y) }
+            val stroke = GestureDescription.StrokeDescription(path, 0, durationMs.coerceAtLeast(40L))
+            val gesture = GestureDescription.Builder().addStroke(stroke).build()
+            dispatchGestureAwait(gesture)
+        } catch (e: Exception) {
+            Log.e(TAG, "Error in performHumanTapAwait: ${e.message}")
+            false
+        }
+    }
 
     /**
      * Dispatches a real human physical finger tap at the given (x, y) coordinates.
@@ -209,6 +260,33 @@ class SaifAccessibilityService : AccessibilityService() {
             dispatchGesture(gesture, null, null)
         } catch (e: Exception) {
             Log.e(TAG, "Error in performHumanTap: ${e.message}")
+            false
+        }
+    }
+
+    /**
+     * Dispatches an awaited human physical swipe gesture between start and end coordinates.
+     */
+    suspend fun performHumanSwipeAwait(
+        startX: Float,
+        startY: Float,
+        endX: Float,
+        endY: Float,
+        durationMs: Long = 320L
+    ): Boolean {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.N) return false
+        return try {
+            val path = Path().apply {
+                moveTo(startX, startY)
+                val ctrlX = (startX + endX) / 2f + (Math.random().toFloat() * 12f - 6f)
+                val ctrlY = (startY + endY) / 2f + (Math.random().toFloat() * 12f - 6f)
+                quadTo(ctrlX, ctrlY, endX, endY)
+            }
+            val stroke = GestureDescription.StrokeDescription(path, 0, durationMs.coerceAtLeast(100L))
+            val gesture = GestureDescription.Builder().addStroke(stroke).build()
+            dispatchGestureAwait(gesture)
+        } catch (e: Exception) {
+            Log.e(TAG, "Error in performHumanSwipeAwait: ${e.message}")
             false
         }
     }
@@ -239,12 +317,12 @@ class SaifAccessibilityService : AccessibilityService() {
     }
 
     /**
-     * Performs a natural human scroll or flick gesture in the requested direction.
+     * Performs a natural human scroll or flick gesture in the requested direction using real display metrics.
      */
     fun performHumanScrollDirection(direction: String = "down", distanceRatio: Float = 0.5f): Boolean {
-        val dm = resources.displayMetrics
-        val screenWidth = dm.widthPixels.toFloat()
-        val screenHeight = dm.heightPixels.toFloat()
+        val metrics = getRealDisplayMetrics()
+        val screenWidth = metrics.first.toFloat()
+        val screenHeight = metrics.second.toFloat()
         val centerX = screenWidth / 2f
 
         return when (direction.lowercase()) {
@@ -315,10 +393,6 @@ class SaifAccessibilityService : AccessibilityService() {
                 break
             }
         }
-
-        // Clean up
-        matchingNodes.forEach { runCatching { it.recycle() } }
-        root.recycle()
         return clicked
     }
 
@@ -358,13 +432,10 @@ class SaifAccessibilityService : AccessibilityService() {
                 val isVoice = voiceKeywords.any { desc.contains(it) || text.contains(it) }
                 if (!isVoice) {
                     if (performClickOnNodeOrParent(node)) {
-                        matching.forEach { runCatching { it.recycle() } }
-                        root.recycle()
                         return true
                     }
                 }
             }
-            matching.forEach { runCatching { it.recycle() } }
         }
 
         val searchTerms = listOf("search youtube", "search", "खोजें", "search here")
@@ -377,16 +448,11 @@ class SaifAccessibilityService : AccessibilityService() {
                 val isVoice = voiceKeywords.any { desc.contains(it) || text.contains(it) }
                 if (!isVoice) {
                     if (performClickOnNodeOrParent(node)) {
-                        matching.forEach { runCatching { it.recycle() } }
-                        root.recycle()
                         return true
                     }
                 }
             }
-            matching.forEach { runCatching { it.recycle() } }
         }
-
-        root.recycle()
 
         // Coordinate fallback:
         // On YouTube & Android top bars, search icon is at X=0.88f (NOT 0.78f where mic is!).
@@ -409,12 +475,9 @@ class SaifAccessibilityService : AccessibilityService() {
             findNodesByViewIdRecursive(root, id, matching)
             for (node in matching) {
                 if (performClickOnNodeOrParent(node)) {
-                    matching.forEach { runCatching { it.recycle() } }
-                    root.recycle()
                     return true
                 }
             }
-            matching.forEach { runCatching { it.recycle() } }
         }
 
         val callTerms = listOf("call", "dial", "कॉल", "sim 1", "sim 2")
@@ -427,16 +490,12 @@ class SaifAccessibilityService : AccessibilityService() {
                 // Call button is in the lower half of screen
                 if (rect.top >= dm.heightPixels * 0.60f) {
                     if (performClickOnNodeOrParent(node)) {
-                        matching.forEach { runCatching { it.recycle() } }
-                        root.recycle()
                         return true
                     }
                 }
             }
-            matching.forEach { runCatching { it.recycle() } }
         }
 
-        root.recycle()
         // Physical fallback for the green call button on Android dialers (bottom center)
         return performHumanTap(dm.widthPixels * 0.5f, dm.heightPixels * 0.86f)
     }
@@ -467,8 +526,6 @@ class SaifAccessibilityService : AccessibilityService() {
                 break
             }
         }
-        matchingNodes.forEach { runCatching { it.recycle() } }
-        root.recycle()
         return clicked
     }
 
@@ -486,14 +543,10 @@ class SaifAccessibilityService : AccessibilityService() {
             if (rect.width() > 50 && rect.height() > 50) {
                 if (performClickOnNodeOrParent(child)) {
                     clicked = true
-                    child.recycle()
                     break
                 }
             }
-            child.recycle()
         }
-        if (scrollable != root) scrollable.recycle()
-        root.recycle()
         return clicked
     }
 
@@ -533,8 +586,6 @@ class SaifAccessibilityService : AccessibilityService() {
             typed = targetNode.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, arguments)
         }
 
-        editableNodes.forEach { runCatching { it.recycle() } }
-        root.recycle()
         return typed
     }
 
@@ -567,8 +618,6 @@ class SaifAccessibilityService : AccessibilityService() {
         }
 
         if (targetNode == null) {
-            editableNodes.forEach { runCatching { it.recycle() } }
-            root.recycle()
             return false
         }
 
@@ -601,9 +650,6 @@ class SaifAccessibilityService : AccessibilityService() {
             putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, text)
         }
         targetNode.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, finalArgs)
-
-        editableNodes.forEach { runCatching { it.recycle() } }
-        root.recycle()
 
         if (pressEnterAfter) {
             kotlinx.coroutines.delay(200)
@@ -659,13 +705,9 @@ class SaifAccessibilityService : AccessibilityService() {
             val child = scrollable.getChild(i) ?: continue
             if (performClickOnNodeOrParent(child)) {
                 clicked = true
-                child.recycle()
                 break
             }
-            child.recycle()
         }
-        if (scrollable != root) scrollable.recycle()
-        root.recycle()
         return clicked
     }
 
@@ -673,7 +715,6 @@ class SaifAccessibilityService : AccessibilityService() {
         val root = rootInActiveWindow ?: return ""
         val sb = StringBuilder()
         collectTextFromNode(root, sb)
-        root.recycle()
         return sb.toString().trim()
     }
 
@@ -684,7 +725,6 @@ class SaifAccessibilityService : AccessibilityService() {
         val root = rootInActiveWindow ?: return ""
         val sb = StringBuilder()
         collectHierarchySummary(root, sb, 0)
-        root.recycle()
         return sb.toString().trim()
     }
 
@@ -712,7 +752,6 @@ class SaifAccessibilityService : AccessibilityService() {
         for (i in 0 until node.childCount) {
             val child = node.getChild(i) ?: continue
             collectHierarchySummary(child, sb, depth + 1)
-            child.recycle()
         }
     }
 
@@ -774,7 +813,6 @@ class SaifAccessibilityService : AccessibilityService() {
             val child = node.getChild(i) ?: continue
             val found = findFirstScrollableNode(child)
             if (found != null) return found
-            child.recycle()
         }
         return null
     }
@@ -820,13 +858,10 @@ class SaifAccessibilityService : AccessibilityService() {
             // Send button in WhatsApp is always on the right side of the screen
             if (rect.right >= dm.widthPixels * 0.65f) {
                 if (performClickOnNodeOrParent(node)) {
-                    sendNodes.forEach { runCatching { it.recycle() } }
-                    root.recycle()
                     return true
                 }
             }
         }
-        sendNodes.forEach { runCatching { it.recycle() } }
 
         // 2. Try by content description
         val sendQueries = listOf("send", "भेजें", "send message", "सेंड", "इरसाल करें")
@@ -838,20 +873,16 @@ class SaifAccessibilityService : AccessibilityService() {
                 node.getBoundsInScreen(rect)
                 if (rect.right >= dm.widthPixels * 0.65f) {
                     if (performClickOnNodeOrParent(node)) {
-                        matching.forEach { runCatching { it.recycle() } }
-                        root.recycle()
                         return true
                     }
                 }
             }
-            matching.forEach { runCatching { it.recycle() } }
         }
 
         // 3. Physical coordinate fallback:
         // Try both keyboard-open position (middle-right) and keyboard-closed position (bottom-right)
         val tappedKeyboardOpen = performHumanTap(dm.widthPixels * 0.92f, dm.heightPixels * 0.54f)
         val tappedKeyboardClosed = performHumanTap(dm.widthPixels * 0.92f, dm.heightPixels * 0.94f)
-        root.recycle()
         return tappedKeyboardOpen || tappedKeyboardClosed
     }
 
@@ -915,9 +946,6 @@ class SaifAccessibilityService : AccessibilityService() {
             }
         }
 
-        candidateNodes.forEach { runCatching { it.recycle() } }
-        root.recycle()
-
         if (clicked) return true
 
         // Reliable physical tap fallback at center of the first video card in YouTube search results
@@ -940,15 +968,11 @@ class SaifAccessibilityService : AccessibilityService() {
                 val desc = (node.contentDescription?.toString() ?: "").lowercase()
                 if (!text.contains("subscribed") && !desc.contains("subscribed") && !text.contains("सदस्यता ली गई")) {
                     if (performClickOnNodeOrParent(node)) {
-                        matching.forEach { runCatching { it.recycle() } }
-                        root.recycle()
                         return true
                     }
                 }
             }
-            matching.forEach { runCatching { it.recycle() } }
         }
-        root.recycle()
         return false
     }
 
@@ -977,7 +1001,6 @@ class SaifAccessibilityService : AccessibilityService() {
         for (i in 0 until node.childCount) {
             val child = node.getChild(i) ?: continue
             collectTextFromNode(child, sb)
-            child.recycle()
         }
     }
 
@@ -1008,8 +1031,8 @@ class SaifAccessibilityService : AccessibilityService() {
         }
 
         suspendCancellableCoroutine { cont ->
+            val executor = java.util.concurrent.Executors.newSingleThreadExecutor()
             try {
-                val executor = java.util.concurrent.Executors.newSingleThreadExecutor()
                 takeScreenshot(
                     Display.DEFAULT_DISPLAY,
                     executor,
@@ -1034,13 +1057,13 @@ class SaifAccessibilityService : AccessibilityService() {
                                     return
                                 }
 
-                                val isSecure = isBitmapMostlyBlack(softBitmap)
+                                val targetLongSide = com.example.agent.AgentConfig.SHOT_LONG_SIDE
+                                val targetQuality = com.example.agent.AgentConfig.SHOT_JPEG_Q
 
-                                // Scale preserving aspect ratio so longer side = 768 px
                                 val w = softBitmap.width
                                 val h = softBitmap.height
                                 val maxDim = maxOf(w, h)
-                                val scale = if (maxDim > 768) 768f / maxDim else 1f
+                                val scale = if (maxDim > targetLongSide) targetLongSide.toFloat() / maxDim else 1f
                                 val targetW = (w * scale).toInt().coerceAtLeast(1)
                                 val targetH = (h * scale).toInt().coerceAtLeast(1)
 
@@ -1051,59 +1074,60 @@ class SaifAccessibilityService : AccessibilityService() {
                                 }
 
                                 val baos = ByteArrayOutputStream()
-                                scaledBitmap.compress(Bitmap.CompressFormat.JPEG, 60, baos)
+                                scaledBitmap.compress(Bitmap.CompressFormat.JPEG, targetQuality, baos)
                                 val jpegBytes = baos.toByteArray()
 
                                 if (scaledBitmap != softBitmap) scaledBitmap.recycle()
                                 softBitmap.recycle()
 
                                 val base64 = Base64.encodeToString(jpegBytes, Base64.NO_WRAP)
-                                if (cont.isActive) cont.resume(ScreenshotCaptureResult(base64, isSecure))
+                                if (cont.isActive) cont.resume(ScreenshotCaptureResult(base64, false))
                             } catch (e: Exception) {
                                 Log.w(TAG, "Screenshot processing error: ${e.message}")
                                 if (cont.isActive) cont.resume(ScreenshotCaptureResult(null, false))
+                            } finally {
+                                try { executor.shutdown() } catch (ignored: Exception) {}
                             }
                         }
 
                         override fun onFailure(errorCode: Int) {
-                            Log.w(TAG, "takeScreenshot failed with code $errorCode")
-                            val isSecure = errorCode == AccessibilityService.ERROR_TAKE_SCREENSHOT_SECURE_WINDOW
-                            if (cont.isActive) cont.resume(ScreenshotCaptureResult(null, isSecure))
+                            try {
+                                Log.w(TAG, "takeScreenshot failed with code $errorCode")
+                                val isSecure = errorCode == AccessibilityService.ERROR_TAKE_SCREENSHOT_SECURE_WINDOW
+                                if (cont.isActive) cont.resume(ScreenshotCaptureResult(null, isSecure))
+                            } finally {
+                                try { executor.shutdown() } catch (ignored: Exception) {}
+                            }
                         }
                     }
                 )
             } catch (e: Exception) {
                 Log.w(TAG, "takeScreenshot error: ${e.message}")
+                try { executor.shutdown() } catch (ignored: Exception) {}
                 if (cont.isActive) cont.resume(ScreenshotCaptureResult(null, false))
             }
         }
     }
 
-    private fun isBitmapMostlyBlack(bitmap: Bitmap): Boolean {
-        return try {
-            val w = bitmap.width
-            val h = bitmap.height
-            if (w <= 0 || h <= 0) return true
-            var nonBlackCount = 0
-            val samplesX = 8
-            val samplesY = 8
-            for (ix in 1..samplesX) {
-                for (iy in 1..samplesY) {
-                    val px = (w * (ix.toFloat() / (samplesX + 1))).toInt().coerceIn(0, w - 1)
-                    val py = (h * (iy.toFloat() / (samplesY + 1))).toInt().coerceIn(0, h - 1)
-                    val color = bitmap.getPixel(px, py)
-                    val r = (color shr 16) and 0xFF
-                    val g = (color shr 8) and 0xFF
-                    val b = color and 0xFF
-                    if (r > 15 || g > 15 || b > 15) {
-                        nonBlackCount++
-                    }
+    suspend fun waitForStable(timeoutMs: Long = 3000L, quietMs: Long = 300L): Boolean {
+        val start = System.currentTimeMillis()
+        var consecutiveStable = 0
+        var lastDigest = ""
+        while (System.currentTimeMillis() - start < timeoutMs) {
+            val quietDuration = System.currentTimeMillis() - lastEventTime
+            if (quietDuration >= quietMs) {
+                val currentText = getVisibleScreenText().take(120)
+                if (currentText == lastDigest && currentText.isNotBlank()) {
+                    consecutiveStable++
+                    if (consecutiveStable >= 2) return true
+                } else {
+                    consecutiveStable = 0
+                    lastDigest = currentText
                 }
             }
-            nonBlackCount < 4 // Less than 4 out of 64 pixels are lit -> consider black/secure
-        } catch (e: Exception) {
-            false
+            delay(80)
         }
+        return false
     }
 
     suspend fun waitForIdle(timeoutMs: Long = 2500, quietMs: Long = 350) {
@@ -1133,8 +1157,6 @@ class SaifAccessibilityService : AccessibilityService() {
             if (root != null) {
                 val matches = root.findAccessibilityNodeInfosByText(query)
                 val found = matches.isNotEmpty()
-                matches.forEach { runCatching { it.recycle() } }
-                root.recycle()
                 if (found) return true
             }
             delay(100)

@@ -1,5 +1,7 @@
 package com.example.ui.components
 
+import android.content.Intent
+import android.net.Uri
 import android.widget.Toast
 import androidx.activity.compose.BackHandler
 import androidx.compose.animation.*
@@ -771,7 +773,7 @@ private fun AdminAnalyticsTab(
 
         LiquidShortcutCard(
             title = "Admin Master API & User Quotas",
-            description = "Configure system default API key, choose InceptionLabs / Atria ASI / Gemini, and set multi-tier free limits.",
+            description = "Configure system default API key, choose inceptionlabs.ai / api.atria-asi.ai / Gemini, and set multi-tier free limits.",
             icon = Icons.Default.VpnKey,
             accentColor = Color(0xFFA78BFA),
             buttonLabel = "Configure API Gateway",
@@ -1817,8 +1819,8 @@ private fun AdminApiGatewayTab(
                     "Cerebras" -> "llama-3.3-70b"
                     "xAI" -> "grok-2-latest"
                     "Perplexity" -> "sonar"
-                    "InceptionLabs" -> "merlin-32k"
-                    "Atria ASI" -> "atria-1"
+                    "inceptionlabs.ai" -> "mercury-2.5"
+                    "api.atria-asi.ai" -> "Atria-Dawn-Preview"
                     "OpenCode.ai" -> "glm-5.1"
                     else -> "gemini-2.0-flash"
                 }
@@ -1831,13 +1833,31 @@ private fun AdminApiGatewayTab(
     var totalLimitInput by remember { mutableIntStateOf(currentConfig.totalApiLimitPerUser) }
     var isPasswordVisible by remember { mutableStateOf(false) }
 
+    LaunchedEffect(currentConfig) {
+        if (currentConfig.defaultProvider.isNotBlank()) {
+            selectedProvider = currentConfig.defaultProvider
+        }
+        if (currentConfig.defaultApiKey.isNotBlank() && !currentConfig.defaultApiKey.contains("MY_")) {
+            apiKeyInput = currentConfig.defaultApiKey
+        } else if (currentConfig.defaultProvider.equals("Gemini", ignoreCase = true)) {
+            apiKeyInput = cleanGoogleDefault
+        }
+        if (currentConfig.defaultModel.isNotBlank()) {
+            modelInput = currentConfig.defaultModel
+        }
+        chatLimitInput = currentConfig.chatLimitPerUser
+        imageLimitInput = currentConfig.imageLimitPerUser
+        appBuildLimitInput = currentConfig.appBuildLimitPerUser
+        totalLimitInput = currentConfig.totalApiLimitPerUser
+    }
+
     var isTestingConnection by remember { mutableStateOf(false) }
     var testResultBanner by remember { mutableStateOf<Pair<Boolean, String>?>(null) }
     var isSaving by remember { mutableStateOf(false) }
 
     val providersList = listOf(
-        "Gemini", "Groq", "OpenRouter", "OpenAI", "DeepSeek", "Anthropic", 
-        "Mistral", "Together", "Cerebras", "xAI", "Perplexity", "InceptionLabs", "Atria ASI", "OpenCode.ai"
+        "Gemini", "Ashna AI", "Groq", "OpenRouter", "OpenAI", "DeepSeek", "Anthropic", 
+        "Mistral", "Together", "Cerebras", "xAI", "Perplexity", "inceptionlabs.ai", "api.atria-asi.ai", "OpenCode.ai"
     )
 
     Column(
@@ -1938,7 +1958,7 @@ private fun AdminApiGatewayTab(
             ) {
                 providersList.forEach { provider ->
                     val isSelected = selectedProvider == provider
-                    val isNew = provider == "InceptionLabs" || provider == "Atria ASI"
+                    val isNew = provider == "inceptionlabs.ai" || provider == "api.atria-asi.ai" || provider == "Ashna AI"
 
                     Box(
                         modifier = Modifier
@@ -1965,6 +1985,7 @@ private fun AdminApiGatewayTab(
                                 selectedProvider = provider
                                 testResultBanner = null
                                 modelInput = when (provider) {
+                                    "Ashna AI" -> "ashna-x1"
                                     "Gemini" -> "gemini-2.0-flash"
                                     "Groq" -> "llama-3.3-70b-versatile"
                                     "OpenRouter" -> "google/gemini-2.0-flash-001"
@@ -1976,8 +1997,8 @@ private fun AdminApiGatewayTab(
                                     "Cerebras" -> "llama-3.3-70b"
                                     "xAI" -> "grok-2-latest"
                                     "Perplexity" -> "sonar"
-                                    "InceptionLabs" -> "merlin-32k"
-                                    "Atria ASI" -> "atria-1"
+                                    "inceptionlabs.ai" -> "mercury-2.5"
+                                    "api.atria-asi.ai" -> "Atria-Dawn-Preview"
                                     "OpenCode.ai" -> "glm-5.1"
                                     else -> "gemini-2.0-flash"
                                 }
@@ -2016,6 +2037,7 @@ private fun AdminApiGatewayTab(
 
             // Endpoint Indicator Box
             val endpointDisplay = when (selectedProvider) {
+                "Ashna AI" -> "🌐 Endpoint: https://api.ashna.ai/v1/api/chat/completions (Ashna AI)"
                 "Gemini" -> "🌐 Endpoint: generativelanguage.googleapis.com/v1beta (Official Google)"
                 "Groq" -> "🌐 Endpoint: https://api.groq.com/openai/v1/chat/completions (Ultra-Fast LPU)"
                 "OpenRouter" -> "🌐 Endpoint: https://openrouter.ai/api/v1/chat/completions (Universal Gateway)"
@@ -2027,8 +2049,8 @@ private fun AdminApiGatewayTab(
                 "Cerebras" -> "🌐 Endpoint: https://api.cerebras.ai/v1/chat/completions (Wafer Scale AI)"
                 "xAI" -> "🌐 Endpoint: https://api.x.ai/v1/chat/completions (Grok Models)"
                 "Perplexity" -> "🌐 Endpoint: https://api.perplexity.ai/chat/completions (Sonar Search)"
-                "InceptionLabs" -> "🌐 Endpoint: https://api.inceptionlabs.ai/v1/chat/completions"
-                "Atria ASI" -> "🌐 Endpoint: https://api.atria-asi.ai/v1/chat/completions"
+                "inceptionlabs.ai" -> "🌐 Endpoint: https://api.inceptionlabs.ai/v1/chat/completions (Inception Labs)"
+                "api.atria-asi.ai" -> "🌐 Endpoint: https://api.atria-asi.ai/v1/chat/completions (Atria ASI)"
                 "OpenCode.ai" -> "🌐 Endpoint: https://opencode.ai/inference/openai/v1/chat/completions"
                 else -> "🌐 Endpoint: OpenAI-compatible custom gateway"
             }
@@ -2068,7 +2090,35 @@ private fun AdminApiGatewayTab(
                     fontSize = 13.sp,
                     fontWeight = FontWeight.SemiBold
                 )
-                Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                Row(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
+                    val getApiKeyUrl = when {
+                        selectedProvider.contains("Ashna", ignoreCase = true) -> "https://app.ashna.ai/integrations?tab=api"
+                        selectedProvider.contains("Gemini", ignoreCase = true) -> "https://aistudio.google.com/app/apikey"
+                        selectedProvider.contains("OpenCode", ignoreCase = true) -> "https://opencode.ai"
+                        selectedProvider.contains("OpenRouter", ignoreCase = true) -> "https://openrouter.ai/keys"
+                        selectedProvider.contains("Groq", ignoreCase = true) -> "https://console.groq.com/keys"
+                        selectedProvider.contains("OpenAI", ignoreCase = true) -> "https://platform.openai.com/api-keys"
+                        selectedProvider.contains("DeepSeek", ignoreCase = true) -> "https://platform.deepseek.com/api_keys"
+                        selectedProvider.contains("Anthropic", ignoreCase = true) -> "https://console.anthropic.com/settings/keys"
+                        selectedProvider.contains("inception", ignoreCase = true) -> "https://inceptionlabs.ai"
+                        selectedProvider.contains("atria", ignoreCase = true) -> "https://api.atria-asi.ai"
+                        else -> null
+                    }
+                    if (getApiKeyUrl != null) {
+                        TextButton(
+                            onClick = {
+                                try {
+                                    val intent = Intent(Intent.ACTION_VIEW, Uri.parse(getApiKeyUrl))
+                                    context.startActivity(intent)
+                                } catch (e: Exception) {}
+                            },
+                            contentPadding = PaddingValues(horizontal = 6.dp, vertical = 2.dp)
+                        ) {
+                            Icon(Icons.Default.OpenInNew, contentDescription = null, tint = Color(0xFF38BDF8), modifier = Modifier.size(13.dp))
+                            Spacer(modifier = Modifier.width(3.dp))
+                            Text("Get Key", color = Color(0xFF38BDF8), fontSize = 11.5.sp, fontWeight = FontWeight.Bold)
+                        }
+                    }
                     if (apiKeyInput.isNotBlank()) {
                         TextButton(
                             onClick = { apiKeyInput = "" },
@@ -2155,6 +2205,7 @@ private fun AdminApiGatewayTab(
 
             // Preset Model Recommendation Chips
             val modelPresets = when (selectedProvider) {
+                "Ashna AI" -> listOf("ashna-x1", "ashna-x1-flash", "gpt-4o-mini", "gemini-2.5-flash", "deepseek-chat", "claude-3-5-sonnet")
                 "Gemini" -> listOf("gemini-2.0-flash", "gemini-1.5-flash", "gemini-1.5-pro")
                 "Groq" -> listOf("llama-3.3-70b-versatile", "llama-3.1-8b-instant", "mixtral-8x7b-32768")
                 "OpenRouter" -> listOf("google/gemini-2.0-flash-001", "meta-llama/llama-3.3-70b-instruct", "deepseek/deepseek-chat")
@@ -2166,8 +2217,8 @@ private fun AdminApiGatewayTab(
                 "Cerebras" -> listOf("llama-3.3-70b", "llama3.1-8b")
                 "xAI" -> listOf("grok-2-latest")
                 "Perplexity" -> listOf("sonar", "sonar-pro")
-                "InceptionLabs" -> listOf("merlin-32k", "merlin-code")
-                "Atria ASI" -> listOf("atria-1", "asi-chat")
+                "inceptionlabs.ai" -> listOf("mercury-2.5", "mercury-2", "mercury-voice", "mercury-coder-small", "mercury-edit-2", "mercury-router")
+                "api.atria-asi.ai" -> listOf("Atria-Dawn-Preview", "Atria-Dawn-Preview-FP8")
                 "OpenCode.ai" -> listOf("glm-5.1", "deepseek-v4-flash")
                 else -> listOf("gemini-2.0-flash", "gpt-4o-mini", "llama-3.3-70b-versatile")
             }
@@ -2371,8 +2422,8 @@ private fun AdminApiGatewayTab(
                         defaultApiKey = apiKeyInput.trim(),
                         defaultProvider = selectedProvider,
                         defaultModel = modelInput.trim().ifBlank {
-                            if (selectedProvider == "InceptionLabs") "merlin-32k"
-                            else if (selectedProvider == "Atria ASI") "atria-1"
+                            if (selectedProvider == "inceptionlabs.ai") "mercury-2.5"
+                            else if (selectedProvider == "api.atria-asi.ai") "Atria-Dawn-Preview"
                             else "gemini-2.0-flash"
                         },
                         testingQuotaPerUser = totalLimitInput,

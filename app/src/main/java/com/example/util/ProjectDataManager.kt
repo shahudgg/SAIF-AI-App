@@ -332,4 +332,166 @@ public class MainActivity extends Activity {
             null
         }
     }
+
+    private const val KEY_PREFIX_VIDEO = "video_proj_"
+    private const val KEY_ALL_VIDEO_NAMES = "all_video_project_names"
+
+    fun saveVideoProject(context: Context, videoProject: com.example.ui.components.VideoProjectData) {
+        val prefs = getPrefs(context)
+        val name = videoProject.projectName.trim()
+        val json = JSONObject().apply {
+            put("projectName", videoProject.projectName)
+            put("resolution", videoProject.resolution)
+            put("fps", videoProject.fps)
+            put("totalDurationSeconds", videoProject.totalDurationSeconds.toDouble())
+            put("currentPositionSeconds", videoProject.currentPositionSeconds.toDouble())
+            put("audioTrackName", videoProject.audioTrackName)
+            put("textOverlay", videoProject.textOverlay)
+            put("effectOverlay", videoProject.effectOverlay)
+            put("selectedClipIndex", videoProject.selectedClipIndex)
+            put("aspectRatio", videoProject.aspectRatio)
+            put("activeFilter", videoProject.activeFilter)
+            put("filterIntensity", videoProject.filterIntensity.toDouble())
+            put("brightness", videoProject.brightness.toDouble())
+            put("contrast", videoProject.contrast.toDouble())
+            put("saturation", videoProject.saturation.toDouble())
+            put("audioVolume", videoProject.audioVolume.toDouble())
+            put("isStabilized", videoProject.isStabilized)
+            put("isChromaKeyEnabled", videoProject.isChromaKeyEnabled)
+            put("activeWatermark", videoProject.activeWatermark)
+            put("activeTransition", videoProject.activeTransition)
+            put("textColorHex", videoProject.textColorHex)
+            put("textFontFamily", videoProject.textFontFamily)
+            put("textAnimation", videoProject.textAnimation)
+            put("overlayMediaUri", videoProject.overlayMediaUri ?: "")
+            put("overlayOpacity", videoProject.overlayOpacity.toDouble())
+            put("activePipPosition", videoProject.activePipPosition)
+            val clipsArray = org.json.JSONArray()
+            videoProject.clips.forEach { clip ->
+                val clipObj = JSONObject().apply {
+                    put("id", clip.id)
+                    put("name", clip.name)
+                    put("uri", clip.uri?.toString() ?: "")
+                    put("durationSeconds", clip.durationSeconds.toDouble())
+                    put("isAiEnhanced", clip.isAiEnhanced)
+                    put("isPhoto", clip.isPhoto)
+                    put("trackIndex", clip.trackIndex)
+                    put("speed", clip.speed.toDouble())
+                    put("volume", clip.volume.toDouble())
+                    put("rotation", clip.rotation.toDouble())
+                    put("isFlippedHorizontally", clip.isFlippedHorizontally)
+                    put("transitionIn", clip.transitionIn)
+                    put("origin", clip.origin)
+                    put("aiWhy", clip.aiWhy)
+                    put("inSeconds", clip.inSeconds.toDouble())
+                    put("outSeconds", clip.outSeconds.toDouble())
+                    put("scale", clip.scale.toDouble())
+                    put("opacity", clip.opacity.toDouble())
+                    put("lastModified", clip.lastModified)
+                }
+                clipsArray.put(clipObj)
+            }
+            put("clips", clipsArray)
+        }
+        prefs.edit().putString(KEY_PREFIX_VIDEO + name, json.toString()).apply()
+
+        // Track list of video project names
+        val existingNames = prefs.getStringSet(KEY_ALL_VIDEO_NAMES, emptySet())?.toMutableSet() ?: mutableSetOf()
+        existingNames.add(name)
+        prefs.edit().putStringSet(KEY_ALL_VIDEO_NAMES, existingNames).apply()
+    }
+
+    fun getVideoProject(context: Context, projectName: String): com.example.ui.components.VideoProjectData? {
+        val prefs = getPrefs(context)
+        val raw = prefs.getString(KEY_PREFIX_VIDEO + projectName.trim(), null) ?: return null
+        return try {
+            val obj = JSONObject(raw)
+            val clipsArray = obj.optJSONArray("clips")
+            val clipsList = mutableListOf<com.example.ui.components.TimelineMediaClip>()
+            if (clipsArray != null) {
+                for (i in 0 until clipsArray.length()) {
+                    val c = clipsArray.getJSONObject(i)
+                    val uriStr = c.optString("uri", "")
+                    val uri = if (uriStr.isNotBlank()) android.net.Uri.parse(uriStr) else null
+                    val dur = c.optDouble("durationSeconds", 6.0).toFloat()
+                    clipsList.add(
+                        com.example.ui.components.TimelineMediaClip(
+                            id = c.optString("id", java.util.UUID.randomUUID().toString()),
+                            name = c.optString("name", "Clip"),
+                            uri = uri,
+                            durationSeconds = dur,
+                            isAiEnhanced = c.optBoolean("isAiEnhanced", false),
+                            isPhoto = c.optBoolean("isPhoto", false),
+                            trackIndex = c.optInt("trackIndex", 0),
+                            speed = c.optDouble("speed", 1.0).toFloat(),
+                            volume = c.optDouble("volume", 1.0).toFloat(),
+                            rotation = c.optDouble("rotation", 0.0).toFloat(),
+                            isFlippedHorizontally = c.optBoolean("isFlippedHorizontally", false),
+                            transitionIn = c.optString("transitionIn", "None"),
+                            origin = c.optString("origin", "manual"),
+                            aiWhy = c.optString("aiWhy", ""),
+                            inSeconds = c.optDouble("inSeconds", 0.0).toFloat(),
+                            outSeconds = c.optDouble("outSeconds", dur.toDouble()).toFloat(),
+                            scale = c.optDouble("scale", 1.0).toFloat(),
+                            opacity = c.optDouble("opacity", 1.0).toFloat(),
+                            lastModified = c.optLong("lastModified", System.currentTimeMillis())
+                        )
+                    )
+                }
+            }
+            val overlayUriStr = obj.optString("overlayMediaUri", "")
+            com.example.ui.components.VideoProjectData(
+                projectName = obj.optString("projectName", projectName),
+                resolution = obj.optString("resolution", "1080P"),
+                fps = obj.optString("fps", "60FPS"),
+                totalDurationSeconds = obj.optDouble("totalDurationSeconds", 42.0).toFloat(),
+                currentPositionSeconds = obj.optDouble("currentPositionSeconds", 12.0).toFloat(),
+                clips = clipsList,
+                audioTrackName = obj.optString("audioTrackName", "Cyber_Synthwave.wav"),
+                textOverlay = obj.optString("textOverlay", "NEON NIGHTS"),
+                effectOverlay = obj.optString("effectOverlay", "Anamorphic Flare"),
+                selectedClipIndex = obj.optInt("selectedClipIndex", 0),
+                aspectRatio = obj.optString("aspectRatio", "9:16"),
+                activeFilter = obj.optString("activeFilter", "Original"),
+                filterIntensity = obj.optDouble("filterIntensity", 0.8).toFloat(),
+                brightness = obj.optDouble("brightness", 0.0).toFloat(),
+                contrast = obj.optDouble("contrast", 0.0).toFloat(),
+                saturation = obj.optDouble("saturation", 0.0).toFloat(),
+                audioVolume = obj.optDouble("audioVolume", 1.0).toFloat(),
+                isStabilized = obj.optBoolean("isStabilized", false),
+                isChromaKeyEnabled = obj.optBoolean("isChromaKeyEnabled", false),
+                activeWatermark = obj.optString("activeWatermark", ""),
+                activeTransition = obj.optString("activeTransition", "Dissolve"),
+                textColorHex = obj.optString("textColorHex", "#00DAF3"),
+                textFontFamily = obj.optString("textFontFamily", "Monospace"),
+                textAnimation = obj.optString("textAnimation", "Glitch Fade"),
+                overlayMediaUri = if (overlayUriStr.isNotBlank()) overlayUriStr else null,
+                overlayOpacity = obj.optDouble("overlayOpacity", 1.0).toFloat(),
+                activePipPosition = obj.optString("activePipPosition", "None")
+            )
+        } catch (e: Exception) {
+            null
+        }
+    }
+
+    fun hasVideoProject(context: Context, projectName: String): Boolean {
+        if (projectName.isBlank()) return false
+        val prefs = getPrefs(context)
+        return prefs.contains(KEY_PREFIX_VIDEO + projectName.trim())
+    }
+
+    fun getAllVideoProjects(context: Context): List<com.example.ui.components.VideoProjectData> {
+        val prefs = getPrefs(context)
+        val names = prefs.getStringSet(KEY_ALL_VIDEO_NAMES, emptySet()) ?: emptySet()
+        return names.mapNotNull { getVideoProject(context, it) }
+    }
+
+    fun deleteVideoProject(context: Context, projectName: String) {
+        val prefs = getPrefs(context)
+        val name = projectName.trim()
+        prefs.edit().remove(KEY_PREFIX_VIDEO + name).apply()
+        val existingNames = prefs.getStringSet(KEY_ALL_VIDEO_NAMES, emptySet())?.toMutableSet() ?: mutableSetOf()
+        existingNames.remove(name)
+        prefs.edit().putStringSet(KEY_ALL_VIDEO_NAMES, existingNames).apply()
+    }
 }

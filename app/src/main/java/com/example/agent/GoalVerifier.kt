@@ -31,80 +31,44 @@ object GoalVerifier {
         .build()
 
     suspend fun verify(goal: String, lastActions: List<String>, snapshot: ScreenSnapshot): VerificationResult = withContext(Dispatchers.IO) {
-        val key = GeminiKeyPool.getNextKey()
-        if (key.isNullOrBlank()) {
-            // If no key available, assume verified if package matches and no obvious error
-            return@withContext VerificationResult(true, "Offline heuristic verification", "")
+        val promptText = StringBuilder()
+            .append("GOAL: ").append(goal).append("\n")
+            .append("LAST ACTIONS:\n")
+        for (act in lastActions.takeLast(4)) {
+            promptText.append("- ").append(act).append("\n")
+        }
+        promptText.append("\nCURRENT SCREEN ELEMENTS:\n")
+            .append(snapshot.toCompactText(3000))
+
+        val images = if (!snapshot.screenshotJpegBase64.isNullOrBlank() && !snapshot.secure) {
+            listOf(snapshot.screenshotJpegBase64)
+        } else {
+            emptyList()
         }
 
-        val model = ModelResolver.resolve(ModelRole.VERIFIER)
-        val url = "https://generativelanguage.googleapis.com/v1beta/models/$model:generateContent?key=$key"
-
         try {
-            val root = JSONObject()
-            val sysPart = JSONObject().put("text", AgentPrompts.VERIFIER_SYSTEM)
-            root.put("systemInstruction", JSONObject().put("parts", JSONArray().put(sysPart)))
-
-            val userParts = JSONArray()
-            val promptText = StringBuilder()
-                .append("GOAL: ").append(goal).append("\n")
-                .append("LAST ACTIONS:\n")
-            for (act in lastActions.takeLast(4)) {
-                promptText.append("- ").append(act).append("\n")
-            }
-            promptText.append("\nCURRENT SCREEN ELEMENTS:\n")
-                .append(snapshot.toCompactText(3000))
-
-            userParts.put(JSONObject().put("text", promptText.toString()))
-
-            if (!snapshot.screenshotJpegBase64.isNullOrBlank() && !snapshot.secure) {
-                userParts.put(JSONObject().apply {
-                    put("inlineData", JSONObject().apply {
-                        put("mimeType", "image/jpeg")
-                        put("data", snapshot.screenshotJpegBase64)
-                    })
-                })
-            }
-
-            val contents = JSONArray().put(JSONObject().apply {
-                put("role", "user")
-                put("parts", userParts)
-            })
-            root.put("contents", contents)
-
-            val genConfig = JSONObject().apply {
-                put("temperature", 0.0)
-                put("responseMimeType", "application/json")
-            }
-            root.put("generationConfig", genConfig)
-
-            val request = Request.Builder()
-                .url(url)
-                .post(root.toString().toRequestBody("application/json".toMediaType()))
-                .build()
-
-            val response = httpClient.newCall(request).execute()
-            val bodyString = response.body?.string() ?: ""
-
-            if (response.isSuccessful) {
-                val json = JSONObject(bodyString)
-                val text = json.optJSONArray("candidates")?.optJSONObject(0)
-                    ?.optJSONObject("content")?.optJSONArray("parts")?.optJSONObject(0)
-                    ?.optString("text", "") ?: ""
-
-                if (text.isNotBlank()) {
-                    val cleanJson = text.trim().removeSurrounding("```json", "```").removeSurrounding("```", "```").trim()
-                    val resultJson = JSONObject(cleanJson)
+            val result = com.example.data.remote.AIApiUtility.executeWithFallback(
+                prompt = promptText.toString(),
+                mode = "general",
+                customSystemPrompt = AgentPrompts.VERIFIER_SYSTEM,
+                base64Images = images
+            )
+            val text = result.getOrNull()
+            if (!text.isNullOrBlank()) {
+                val cleanJson = text.trim()
+                    .removePrefix("```json")
+                    .removePrefix("```")
+                    .removeSuffix("```")
+                    .trim()
+                val jsonStart = cleanJson.indexOf('{')
+                val jsonEnd = cleanJson.lastIndexOf('}')
+                if (jsonStart >= 0 && jsonEnd > jsonStart) {
+                    val resultJson = JSONObject(cleanJson.substring(jsonStart, jsonEnd + 1))
                     val achieved = resultJson.optBoolean("achieved", false)
                     val evidence = resultJson.optString("evidence", "")
                     val missing = resultJson.optString("missing", "")
                     Log.i(TAG, "GoalVerifier result: achieved=$achieved, evidence='$evidence', missing='$missing'")
                     return@withContext VerificationResult(achieved, evidence, missing)
-                }
-            } else {
-                Log.w(TAG, "GoalVerifier request failed HTTP ${response.code}: $bodyString")
-                if (response.code == 429 || response.code == 403) {
-                    GeminiKeyPool.reportError(key, response.code)
                 }
             }
         } catch (e: Exception) {

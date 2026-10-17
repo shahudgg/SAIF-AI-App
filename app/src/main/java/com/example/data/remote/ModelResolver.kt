@@ -2,6 +2,7 @@ package com.example.data.remote
 
 import android.content.Context
 import android.util.Log
+import com.example.llm.LlmGateway
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import okhttp3.OkHttpClient
@@ -102,28 +103,44 @@ object ModelResolver {
         if (clean.isNotBlank()) {
             deadModels.add(clean)
             availableModels.remove(clean)
+            LlmGateway.markModelDead("Gemini", clean)
             Log.w(TAG, "Marked model '$clean' as dead for current session")
         }
+    }
+
+    fun markDead(provider: String, model: String) {
+        val clean = model.trim().removePrefix("models/")
+        if (clean.isNotBlank()) {
+            deadModels.add(clean)
+            availableModels.remove(clean)
+            LlmGateway.markModelDead(provider, clean)
+            Log.w(TAG, "Marked model '$provider/$clean' as dead for current session")
+        }
+    }
+
+    fun isDead(model: String): Boolean {
+        val clean = model.trim().removePrefix("models/")
+        return deadModels.contains(clean) || LlmGateway.isModelDead("Gemini", clean)
     }
 
     fun resolve(role: ModelRole): String {
         val candidates = when (role) {
             ModelRole.AGENT -> listOf(
                 GeminiModels.AGENT,
-                "gemini-flash-latest",
-                "gemini-2.5-flash-lite",
-                "gemini-3.5-flash"
+                "gemini-2.0-flash",
+                "gemini-1.5-flash",
+                "gemini-2.0-flash-lite"
             )
             ModelRole.FAST, ModelRole.ROUTER, ModelRole.VERIFIER -> listOf(
                 GeminiModels.FAST,
-                "gemini-flash-latest",
-                "gemini-3.1-flash-lite-preview",
-                "gemini-3.5-flash"
+                "gemini-2.0-flash-lite",
+                "gemini-2.0-flash",
+                "gemini-1.5-flash"
             )
             ModelRole.CHAT -> GeminiModels.CHAT_FALLBACKS
             ModelRole.LIVE -> listOf(
-                GeminiModels.LIVE,
-                GeminiModels.LIVE_LEGACY
+                "gemini-2.0-flash",
+                "gemini-1.5-flash"
             )
             ModelRole.TRANSCRIBE -> GeminiModels.TRANSCRIPTION_FALLBACKS
         }

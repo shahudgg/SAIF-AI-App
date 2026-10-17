@@ -22,7 +22,7 @@ object GeminiService {
         apiKey: String,
         base64Audio: String
     ): Result<String> = withContext(Dispatchers.IO) {
-        val trimmedKey = apiKey.trim()
+        val trimmedKey = if (GeminiKeyPool.isGeminiKey(apiKey)) apiKey.trim() else (GeminiKeyPool.getNextKey() ?: apiKey.trim())
         val model = ModelResolver.resolve(ModelRole.TRANSCRIBE)
         val url = "https://generativelanguage.googleapis.com/v1beta/models/$model:generateContent?key=$trimmedKey"
         
@@ -75,7 +75,8 @@ object GeminiService {
 
     suspend fun generateSpeech(apiKey: String, text: String, voiceName: String): Result<String> = withContext(Dispatchers.IO) {
         val model = GeminiModels.TTS
-        val url = "https://generativelanguage.googleapis.com/v1beta/models/$model:generateContent?key=${apiKey.trim()}"
+        val trimmedKey = if (GeminiKeyPool.isGeminiKey(apiKey)) apiKey.trim() else (GeminiKeyPool.getNextKey() ?: apiKey.trim())
+        val url = "https://generativelanguage.googleapis.com/v1beta/models/$model:generateContent?key=$trimmedKey"
         val jsonBody = JSONObject()
 
         val contents = JSONArray().put(JSONObject().apply {
@@ -145,7 +146,14 @@ object GeminiService {
         customSystemPrompt: String = "",
         onChunk: suspend (String) -> Unit
     ): Result<String> {
-        return AIApiUtility.executeWithFallback(prompt, mode, history, customSystemPrompt, emptyList(), onChunk)
+        return AIApiUtility.executeWithFallback(
+            prompt = prompt,
+            mode = mode,
+            history = history,
+            customSystemPrompt = customSystemPrompt,
+            base64Images = emptyList(),
+            onChunk = onChunk
+        )
     }
 
     suspend fun streamGenerateContentWithKey(

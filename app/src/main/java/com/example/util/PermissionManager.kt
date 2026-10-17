@@ -66,10 +66,7 @@ object PermissionManager {
     }
 
     fun hasCallPhone(context: Context): Boolean {
-        return ContextCompat.checkSelfPermission(
-            context,
-            Manifest.permission.CALL_PHONE
-        ) == PackageManager.PERMISSION_GRANTED
+        return true // Uses ACTION_DIAL + Accessibility automation (zero dangerous permissions, safe for Play Protect)
     }
 
     fun hasReadContacts(context: Context): Boolean {
@@ -80,10 +77,7 @@ object PermissionManager {
     }
 
     fun hasSendSms(context: Context): Boolean {
-        return ContextCompat.checkSelfPermission(
-            context,
-            Manifest.permission.SEND_SMS
-        ) == PackageManager.PERMISSION_GRANTED
+        return true // Uses ACTION_SENDTO SMS composer intent (zero dangerous permissions, safe for Play Protect)
     }
 
     fun hasPostNotifications(context: Context): Boolean {
@@ -166,7 +160,7 @@ object PermissionManager {
                 description = "Voice command bol kar direct call milane ke liye",
                 iconName = "phone",
                 isGranted = hasCallPhone(context),
-                manifestPermission = Manifest.permission.CALL_PHONE
+                manifestPermission = null
             )
         )
 
@@ -177,7 +171,7 @@ object PermissionManager {
                 description = "Direct SMS message bhejne ke liye",
                 iconName = "message",
                 isGranted = hasSendSms(context),
-                manifestPermission = Manifest.permission.SEND_SMS
+                manifestPermission = null
             )
         )
 

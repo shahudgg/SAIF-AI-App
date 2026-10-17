@@ -3,33 +3,30 @@ package com.example
 import android.Manifest
 import android.content.Context
 import android.content.pm.PackageManager
-import android.media.AudioFormat
-import android.media.AudioRecord
-import android.media.MediaRecorder
-import android.media.audiofx.AcousticEchoCanceler
-import android.media.audiofx.AutomaticGainControl
-import android.media.audiofx.NoiseSuppressor
+import android.media.AudioManager
+import android.util.Base64
 import android.util.Log
 import androidx.core.content.ContextCompat
+import com.example.audio.AudioPipeline
+import com.example.audio.AudioSourceMode
+import com.example.audio.TurnManager
+import com.example.audio.TurnState
+import com.example.audio.VadGate
 import com.example.data.local.ChatMessageEntity
 import com.example.data.local.ChatRepository
-import com.example.data.local.ProviderSettingsManager
 import com.example.data.local.SaifDatabase
 import com.example.data.remote.AIApiUtility
-import com.example.data.remote.GeminiService
 import com.example.util.AudioTranscriptionEngine
-import com.example.util.AutonomousScreenAgent
 import com.example.util.DeviceAction
 import com.example.util.DeviceActionManager
 import com.example.util.DeviceActionParser
 import com.example.util.SaifAccessibilityService
 import com.example.util.SmartConversationMemory
-import com.example.util.VoiceActivityDetector
 import com.example.utils.TTSManager
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
-import java.io.ByteArrayOutputStream
+import kotlinx.coroutines.flow.asStateFlow
 import java.util.concurrent.ConcurrentLinkedQueue
 import java.util.concurrent.atomic.AtomicBoolean
 
@@ -37,6 +34,15 @@ enum class VoiceSessionState {
     IDLE, LISTENING, PROCESSING, SPEAKING
 }
 
+/**
+ * Modernized Live Voice Session Manager with:
+ * - Dedicated urgent-priority AudioPipeline.
+ * - Zero first-word cutoffs: 600 ms circular pre-roll buffer stitching.
+ * - Adaptive noise floor VadGate with multi-feature voicing criteria.
+ * - Decoupled TurnManager with an isolated TASK lane so background app audio
+ *   (e.g., YouTube playback, terrace noise) never terminates running agent tasks.
+ * - Clean audio session routing with proper MODE_NORMAL restoration on exit.
+ */
 class LiveVoiceSessionManager(
     private val context: Context,
     private val onClose: () -> Unit
@@ -44,26 +50,23 @@ class LiveVoiceSessionManager(
     companion object {
         private const val TAG = "LiveVoiceSessionManager"
         private const val SAMPLE_RATE = 16000
-        private const val CHANNEL_CONFIG = AudioFormat.CHANNEL_IN_MONO
-        private const val AUDIO_FORMAT = AudioFormat.ENCODING_PCM_16BIT
-        private const val TTS_COOLDOWN_MS = 450L
+        private const val TTS_COOLDOWN_MS = 400L
     }
 
     private val _amplitude = MutableStateFlow(0f)
-    val amplitude: StateFlow<Float> = _amplitude
+    val amplitude: StateFlow<Float> = _amplitude.asStateFlow()
 
     private val _sessionState = MutableStateFlow(VoiceSessionState.IDLE)
-    val sessionState: StateFlow<VoiceSessionState> = _sessionState
+    val sessionState: StateFlow<VoiceSessionState> = _sessionState.asStateFlow()
 
     private val _liveSubtitle = MutableStateFlow("")
-    val liveSubtitle: StateFlow<String> = _liveSubtitle
+    val liveSubtitle: StateFlow<String> = _liveSubtitle.asStateFlow()
 
     private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
 
-    private var audioRecord: AudioRecord? = null
-    private var echoCanceler: AcousticEchoCanceler? = null
-    private var noiseSuppressor: NoiseSuppressor? = null
-    private var gainControl: AutomaticGainControl? = null
+    private var audioPipeline: AudioPipeline? = null
+    private val vadGate = VadGate(sampleRate = SAMPLE_RATE)
+    private val turnManager = TurnManager()
 
     @Volatile
     private var isRecording = false
@@ -74,14 +77,13 @@ class LiveVoiceSessionManager(
     @Volatile
     private var lastTtsFinishTime = 0L
 
+    @Volatile
+    private var lastExecutedGoal: String = ""
+
+    @Volatile
+    private var lastTaskCompletionTime = 0L
+
     private val isProcessingTurn = AtomicBoolean(false)
-
-    private val minBufferSize = maxOf(
-        AudioRecord.getMinBufferSize(SAMPLE_RATE, CHANNEL_CONFIG, AUDIO_FORMAT),
-        2048
-    )
-
-    private val vad = VoiceActivityDetector(sampleRate = SAMPLE_RATE)
 
     private var animationJob: Job? = null
     private var processingJob: Job? = null
@@ -90,12 +92,20 @@ class LiveVoiceSessionManager(
     private val speechQueue = ConcurrentLinkedQueue<String>()
     private val isPlayingQueueItem = AtomicBoolean(false)
     private val isStreamGenerationComplete = AtomicBoolean(false)
-    private val audioManager = context.getSystemService(Context.AUDIO_SERVICE) as? android.media.AudioManager
+    private val audioManager = context.getSystemService(Context.AUDIO_SERVICE) as? AudioManager
 
     init {
         TTSManager.init(context)
         SmartConversationMemory.init(context)
         com.example.agent.PhoneAgentRuntime.init(context)
+
+        // Observe task running state to keep the task lane isolated
+        scope.launch {
+            com.example.agent.PhoneAgentRuntime.status.collect { status ->
+                val isRunning = status.state == com.example.agent.AgentStatusState.RUNNING
+                turnManager.setTaskRunning(isRunning, status.currentGoal)
+            }
+        }
     }
 
     fun start() {
@@ -105,212 +115,108 @@ class LiveVoiceSessionManager(
             return
         }
 
-        try {
-            audioManager?.mode = android.media.AudioManager.MODE_IN_COMMUNICATION
-            audioManager?.isSpeakerphoneOn = true
-        } catch (e: Exception) {
-            Log.w(TAG, "Failed setting audioManager mode: ${e.message}")
-        }
+        vadGate.reset()
+        turnManager.transitionTo(TurnState.LISTENING)
+        _sessionState.value = VoiceSessionState.LISTENING
+        _liveSubtitle.value = "LISTENING"
 
-        // Prefer VOICE_COMMUNICATION for hardware DSP echo cancellation and beamforming
-        audioRecord = try {
-            AudioRecord(
-                MediaRecorder.AudioSource.VOICE_COMMUNICATION,
-                SAMPLE_RATE,
-                CHANNEL_CONFIG,
-                AUDIO_FORMAT,
-                minBufferSize * 2
-            ).takeIf { it.state == AudioRecord.STATE_INITIALIZED }
-        } catch (e: Exception) {
-            Log.w(TAG, "VOICE_COMMUNICATION AudioRecord init failed, falling back to MIC: ${e.message}")
-            null
-        } ?: try {
-            AudioRecord(
-                MediaRecorder.AudioSource.MIC,
-                SAMPLE_RATE,
-                CHANNEL_CONFIG,
-                AUDIO_FORMAT,
-                minBufferSize * 2
-            )
-        } catch (e: Exception) {
-            Log.e(TAG, "AudioRecord init failed: ${e.message}")
-            null
-        }
-
-        if (audioRecord?.state != AudioRecord.STATE_INITIALIZED) {
-            Log.e(TAG, "AudioRecord could not be initialized")
-            onClose()
-            return
-        }
-
-        val sessionId = audioRecord?.audioSessionId ?: 0
-        if (sessionId != 0) {
-            try {
-                if (AcousticEchoCanceler.isAvailable()) {
-                    echoCanceler = AcousticEchoCanceler.create(sessionId)?.apply {
-                        enabled = true
-                        Log.d(TAG, "AcousticEchoCanceler enabled on session $sessionId")
-                    }
-                }
-            } catch (e: Throwable) {
-                Log.w(TAG, "AEC enable error: ${e.message}")
+        audioPipeline = AudioPipeline(
+            context = context,
+            sampleRate = SAMPLE_RATE,
+            frameDurationMs = 20,
+            preRollMs = 600,
+            sourceMode = AudioSourceMode.AUTO,
+            onFrameCaptured = { frame, _ ->
+                handleIncomingAudioFrame(frame)
             }
+        )
 
-            try {
-                if (NoiseSuppressor.isAvailable()) {
-                    noiseSuppressor = NoiseSuppressor.create(sessionId)?.apply {
-                        enabled = true
-                        Log.d(TAG, "NoiseSuppressor enabled on session $sessionId")
-                    }
-                }
-            } catch (e: Throwable) {
-                Log.w(TAG, "NoiseSuppressor enable error: ${e.message}")
-            }
-
-            try {
-                if (AutomaticGainControl.isAvailable()) {
-                    gainControl = AutomaticGainControl.create(sessionId)?.apply {
-                        enabled = true
-                        Log.d(TAG, "AutomaticGainControl enabled on session $sessionId")
-                    }
-                }
-            } catch (e: Throwable) {
-                Log.w(TAG, "AGC enable error: ${e.message}")
-            }
-        }
-
-        try {
-            audioRecord?.startRecording()
-        } catch (e: Exception) {
-            Log.e(TAG, "startRecording failed: ${e.message}")
+        val started = audioPipeline?.start() ?: false
+        if (!started) {
+            Log.e(TAG, "Failed starting AudioPipeline")
             onClose()
             return
         }
 
         isRecording = true
-        vad.reset()
-        _sessionState.value = VoiceSessionState.LISTENING
-        _liveSubtitle.value = "LISTENING"
-
-        scope.launch {
-            recordLoop()
-        }
+        Log.i(TAG, "LiveVoiceSessionManager started with real-time AudioPipeline")
     }
 
-    private suspend fun recordLoop() {
-        val buffer = ShortArray(minBufferSize / 2)
-        val byteBuffer = ByteArray(buffer.size * 2)
-        val currentPcmBuffer = ByteArrayOutputStream()
-        var hasSpokenInTurn = false
+    private fun handleIncomingAudioFrame(frame: ByteArray) {
+        if (!isRecording) return
 
-        while (isRecording) {
-            val readShorts = audioRecord?.read(buffer, 0, buffer.size) ?: 0
-            if (readShorts > 0) {
-                // Convert shorts to 16-bit PCM byte array (little-endian)
-                for (i in 0 until readShorts) {
-                    val s = buffer[i].toInt()
-                    byteBuffer[i * 2] = (s and 0xFF).toByte()
-                    byteBuffer[i * 2 + 1] = ((s shr 8) and 0xFF).toByte()
-                }
+        val now = System.currentTimeMillis()
+        val isCurrentlySpeaking = isTtsSpeaking || _sessionState.value == VoiceSessionState.SPEAKING
 
-                val frameBytes = byteBuffer.copyOf(readShorts * 2)
-                val isCurrentlySpeaking = isTtsSpeaking || _sessionState.value == VoiceSessionState.SPEAKING
-                val vadResult = vad.processFrame(frameBytes, isCurrentlySpeaking)
+        // Run VAD on the 20ms frame
+        val vadResult = vadGate.processFrame(
+            pcmFrame = frame,
+            isTtsSpeaking = isCurrentlySpeaking,
+            preRollSupplier = { audioPipeline?.snapshotPreRoll() ?: emptyList() }
+        )
 
-                // 1. Check for Smart Interruption during SPEAKING
-                if (isCurrentlySpeaking) {
-                    // Require confirmed vocal speech interruption from VAD (never trigger on ambient clatter/noise)
-                    val isBargeIn = vadResult.isInterruption
-
-                    if (isBargeIn) {
-                        Log.d(TAG, "Smart user interruption detected during TTS! Stopping speech immediately.")
-                        stopSpeaking(causedByUserInterruption = true)
-                        currentPcmBuffer.reset()
-                        hasSpokenInTurn = true
-                        _sessionState.value = VoiceSessionState.LISTENING
-                        _liveSubtitle.value = "Listening..."
-                        _amplitude.value = vadResult.normalizedAmplitude
-
-                        currentPcmBuffer.write(frameBytes)
-                        vad.notifySpeechStarted()
-                    }
-                    delay(8)
-                    continue
-                }
-
-                // 2. Cooldown period right after TTS finishes naturally to avoid room echo
-                val now = System.currentTimeMillis()
-                if (now - lastTtsFinishTime < TTS_COOLDOWN_MS) {
-                    _amplitude.value = 0f
-                    delay(8)
-                    continue
-                }
-
-                val currentState = _sessionState.value
-
-                // 3. User is in PROCESSING (THINKING / EXECUTING):
-                // Do not cancel or drop the running task on ambient noise or clatter!
-                if (currentState == VoiceSessionState.PROCESSING) {
-                    delay(12)
-                    continue
-                }
-
-                // 4. Normal LISTENING mode
-                if (currentState == VoiceSessionState.LISTENING) {
-                    _amplitude.value = vadResult.normalizedAmplitude
-
-                    if (vadResult.isSpeechActive) {
-                        if (!hasSpokenInTurn) {
-                            hasSpokenInTurn = true
-                            _liveSubtitle.value = "Listening..."
-                        }
-                        currentPcmBuffer.write(frameBytes)
-                    } else if (hasSpokenInTurn) {
-                        currentPcmBuffer.write(frameBytes)
-
-                        // 5. Smart End-of-Speech Detection
-                        if (vadResult.isEndOfSpeech) {
-                            val pcmData = currentPcmBuffer.toByteArray()
-                            currentPcmBuffer.reset()
-                            hasSpokenInTurn = false
-                            vad.reset()
-
-                            val minVoiceBytes = (SAMPLE_RATE * 2 * 0.45).toInt() // At least 450ms of sustained speech
-                            if (pcmData.size >= minVoiceBytes) {
-                                Log.d(TAG, "Natural end of speech detected (${pcmData.size} bytes). Switching to THINKING.")
-                                _sessionState.value = VoiceSessionState.PROCESSING
-                                _liveSubtitle.value = "THINKING"
-                                triggerTurnProcessing(pcmData)
-                            } else {
-                                Log.d(TAG, "Audio too short (${pcmData.size} bytes), ignoring ambient noise click and resuming listening.")
-                                _sessionState.value = VoiceSessionState.LISTENING
-                                _liveSubtitle.value = "LISTENING"
-                            }
-                        }
-                    }
-                }
+        // 1. Handle Barge-in during TTS playback
+        if (isCurrentlySpeaking) {
+            if (vadResult.isInterruption) {
+                Log.d(TAG, "Near-field vocal barge-in confirmed! Halting TTS immediately.")
+                stopSpeaking(causedByUserInterruption = true)
+                turnManager.transitionTo(TurnState.LISTENING)
+                _sessionState.value = VoiceSessionState.LISTENING
+                _liveSubtitle.value = "Listening..."
+                _amplitude.value = vadResult.normalizedAmplitude
             }
-            delay(10)
+            return
+        }
+
+        // 2. Cooldown right after TTS finishes naturally to prevent acoustic room echo
+        if (now - lastTtsFinishTime < TTS_COOLDOWN_MS) {
+            _amplitude.value = 0f
+            return
+        }
+
+        // 3. During model processing, update waveform visuals but don't disrupt
+        if (_sessionState.value == VoiceSessionState.PROCESSING && !turnManager.isTaskRunning.value) {
+            return
+        }
+
+        // 4. Update live amplitude for visual glow animations
+        _amplitude.value = vadResult.normalizedAmplitude
+
+        if (vadResult.isSpeechActive) {
+            if (_sessionState.value == VoiceSessionState.LISTENING && _liveSubtitle.value != "Listening...") {
+                _liveSubtitle.value = "Listening..."
+            }
+        }
+
+        // 5. Speech turn completed
+        if (vadResult.isEndOfSpeech && vadResult.completedAudio != null) {
+            val pcmData = vadResult.completedAudio
+            val durationMs = vadResult.audioDurationMs
+            val snrDb = vadResult.snrDb
+            val voicedRatio = vadResult.voicedRatio
+
+            Log.d(TAG, "Completed speech turn: ${pcmData.size} bytes (${durationMs}ms, SNR=${snrDb}dB, Voiced=$voicedRatio)")
+            triggerTurnProcessing(pcmData, durationMs, snrDb, voicedRatio)
         }
     }
 
-    private fun triggerTurnProcessing(pcmData: ByteArray) {
+    private fun triggerTurnProcessing(pcmData: ByteArray, durationMs: Long, snrDb: Double, voicedRatio: Float) {
         if (!isProcessingTurn.compareAndSet(false, true)) {
-            Log.w(TAG, "Processing already in progress, dropping duplicate turn.")
+            Log.d(TAG, "Turn processor is already active. Enqueueing/dropping duplicate.")
             return
         }
 
         processingJob?.cancel()
         processingJob = scope.launch {
             try {
-                processAudioTurn(pcmData)
+                processAudioTurn(pcmData, durationMs, snrDb, voicedRatio)
             } finally {
                 isProcessingTurn.set(false)
             }
         }
     }
 
-    private suspend fun processAudioTurn(pcmData: ByteArray) {
+    private suspend fun processAudioTurn(pcmData: ByteArray, durationMs: Long, snrDb: Double, voicedRatio: Float) {
         if (pcmData.isEmpty()) {
             _sessionState.value = VoiceSessionState.LISTENING
             _liveSubtitle.value = "LISTENING"
@@ -318,42 +224,91 @@ class LiveVoiceSessionManager(
         }
 
         try {
+            turnManager.transitionTo(TurnState.TRANSCRIBING)
             val wavData = wrapPcmToWav(pcmData, SAMPLE_RATE, 1, 16)
-            val base64Audio = android.util.Base64.encodeToString(wavData, android.util.Base64.NO_WRAP)
+            val base64Audio = Base64.encodeToString(wavData, Base64.NO_WRAP)
             val apiKey = AudioTranscriptionEngine.resolveActiveApiKey()
 
-            val transcriptionResult = transcribeWav(apiKey, base64Audio, wavData)
+            val transcriptionResult = AudioTranscriptionEngine.transcribeWav(
+                apiKey = apiKey,
+                base64Audio = base64Audio,
+                rawWavBytes = wavData,
+                context = context,
+                durationMs = durationMs,
+                snrDb = snrDb,
+                voicedRatio = voicedRatio
+            )
+
             if (!transcriptionResult.isSuccess) {
                 val err = transcriptionResult.exceptionOrNull()?.message ?: "Transcription failed"
-                Log.w(TAG, "Transcription failed: $err")
-                _liveSubtitle.value = "Listening..."
+                Log.d(TAG, "Transcription filtered/failed: $err")
+                _liveSubtitle.value = if (turnManager.isTaskRunning.value) "Executing..." else "LISTENING"
                 _sessionState.value = VoiceSessionState.LISTENING
+                turnManager.transitionTo(TurnState.LISTENING)
                 return
             }
 
             val text = transcriptionResult.getOrNull()?.trim() ?: ""
             if (text.isBlank()) {
-                Log.d(TAG, "Transcribed text is empty. Returning to LISTENING.")
+                _sessionState.value = VoiceSessionState.LISTENING
+                _liveSubtitle.value = if (turnManager.isTaskRunning.value) "Executing..." else "LISTENING"
+                turnManager.transitionTo(TurnState.LISTENING)
+                return
+            }
+
+            Log.i(TAG, "Live Voice Utterance Transcribed: \"$text\"")
+
+            // Check Task Lane Isolation
+            val taskAction = turnManager.shouldProcessUtterance(text)
+            when (taskAction) {
+                is TurnManager.TaskLaneAction.IGNORE_BACKGROUND_AUDIO -> {
+                    Log.d(TAG, "Ignored background/controlled audio while task is active: '$text'")
+                    _liveSubtitle.value = "Executing..."
+                    _sessionState.value = VoiceSessionState.LISTENING
+                    turnManager.transitionTo(TurnState.LISTENING)
+                    return
+                }
+                is TurnManager.TaskLaneAction.TASK_EMERGENCY_STOP -> {
+                    Log.i(TAG, "Emergency stop requested by user during active task!")
+                    com.example.agent.PhoneAgentRuntime.control("stop")
+                    stopSpeaking()
+                    enqueueSentenceForSpeech("Task rok diya gaya hai.")
+                    playNextSentenceIfAvailable()
+                    _sessionState.value = VoiceSessionState.LISTENING
+                    _liveSubtitle.value = "LISTENING"
+                    turnManager.transitionTo(TurnState.LISTENING)
+                    return
+                }
+                is TurnManager.TaskLaneAction.ATTENTION_COMMAND -> {
+                    Log.i(TAG, "Attention command during active task: '${taskAction.command}'")
+                    // Will continue to route with the stripped command
+                }
+                TurnManager.TaskLaneAction.PROCESS_NORMAL -> {
+                    // Normal route
+                }
+            }
+
+            val cleanUtterance = if (taskAction is TurnManager.TaskLaneAction.ATTENTION_COMMAND) {
+                taskAction.command
+            } else {
+                text
+            }
+
+            // Quick Voice Stop
+            val lower = cleanUtterance.lowercase()
+            if (lower in listOf("stop", "ruko", "cancel", "band karo")) {
+                stopSpeaking()
+                com.example.agent.PhoneAgentRuntime.control("stop")
                 _sessionState.value = VoiceSessionState.LISTENING
                 _liveSubtitle.value = "LISTENING"
+                turnManager.transitionTo(TurnState.LISTENING)
                 return
             }
 
-            Log.i(TAG, "User Speech Transcribed: \"$text\"")
+            // Save facts to Smart Conversation Memory
+            SmartConversationMemory.extractAndSaveFacts(cleanUtterance)
 
-            // Quick Voice Cancellation Commands
-            val lower = text.lowercase()
-            if (lower in listOf("stop", "ruko", "chup", "chup ho jao", "cancel", "shant ho jao", "quiet", "bas")) {
-                stopSpeaking()
-                _sessionState.value = VoiceSessionState.LISTENING
-                _liveSubtitle.value = "Listening..."
-                return
-            }
-
-            // Extract facts from user utterance into Smart Conversation Memory
-            SmartConversationMemory.extractAndSaveFacts(text)
-
-            // Save user message to Room DB for the active session
+            // Save user message to Room DB
             val db = SaifDatabase.getDatabase(context)
             val repo = ChatRepository(db.chatDao())
             val activeSessionId = LiveVoiceManager.currentSessionId
@@ -363,102 +318,138 @@ class LiveVoiceSessionManager(
                     ChatMessageEntity(
                         sessionId = activeSessionId,
                         role = "user",
-                        content = text,
+                        content = cleanUtterance,
                         timestamp = System.currentTimeMillis()
                     )
                 )
             }
 
-            // Retrieve recent conversation history for multi-turn context
-            val recentEntities = if (activeSessionId != null) {
-                repo.getRecentMessages(activeSessionId, 14)
-            } else {
-                emptyList()
-            }
-
-            val conversationHistory = recentEntities.map { entity ->
-                Pair(if (entity.role == "user") "user" else "model", entity.content)
-            }
-
             val isAgentRunning = com.example.agent.PhoneAgentRuntime.status.value.state == com.example.agent.AgentStatusState.RUNNING
-            val routeDecision = com.example.agent.IntentRouter.route(text, isAgentRunning)
+            val routeDecision = com.example.agent.IntentRouter.route(cleanUtterance, isAgentRunning)
 
             if (routeDecision.route == com.example.agent.RouteDestination.CONTROL) {
-                val reply = com.example.agent.PhoneAgentRuntime.control(routeDecision.controlCmd ?: text)
+                val reply = com.example.agent.PhoneAgentRuntime.control(routeDecision.controlCmd ?: cleanUtterance)
                 enqueueSentenceForSpeech(reply)
                 playNextSentenceIfAvailable()
                 _sessionState.value = VoiceSessionState.LISTENING
                 _liveSubtitle.value = "LISTENING"
+                turnManager.transitionTo(TurnState.LISTENING)
                 return
             }
 
             if (routeDecision.route == com.example.agent.RouteDestination.TASK) {
-                // Immediate acknowledgement <= 6 words
-                val immediateAck = when {
-                    text.contains("youtube", ignoreCase = true) -> "Ji, YouTube par kar raha hu."
-                    text.contains("whatsapp", ignoreCase = true) -> "Ji, WhatsApp par bhej raha hu."
-                    text.contains("call", ignoreCase = true) -> "Ji, call mila raha hu."
-                    text.contains("instagram", ignoreCase = true) -> "Ji, Instagram par dekh raha hu."
-                    else -> "Ji, phone par execute kar raha hu."
+                val now = System.currentTimeMillis()
+                val normalizedGoal = routeDecision.goal.trim().lowercase()
+                if (normalizedGoal == lastExecutedGoal && (now - lastTaskCompletionTime) < 5000L) {
+                    Log.i(TAG, "Suppressed duplicate task echo within cooldown: '$normalizedGoal'")
+                    _sessionState.value = VoiceSessionState.LISTENING
+                    _liveSubtitle.value = "LISTENING"
+                    turnManager.transitionTo(TurnState.LISTENING)
+                    return
                 }
-                enqueueSentenceForSpeech(immediateAck)
-                playNextSentenceIfAvailable()
 
-                // Submit to PhoneAgentRuntime with decoupled scope so mic stays LIVE!
-                com.example.agent.PhoneAgentRuntime.submit(
-                    goal = routeDecision.goal,
-                    listener = object : com.example.agent.AgentListener {
-                        override fun onMilestone(text: String) {
-                            enqueueSentenceForSpeech(text)
-                            playNextSentenceIfAvailable()
-                        }
-
-                        override fun onAskUser(question: String, options: List<String>?) {
-                            enqueueSentenceForSpeech(question)
-                            playNextSentenceIfAvailable()
-                        }
-
-                        override fun onFinished(outcome: com.example.agent.AgentOutcome) {
-                            enqueueSentenceForSpeech(outcome.summary)
-                            playNextSentenceIfAvailable()
-
-                            if (activeSessionId != null && outcome.summary.isNotBlank()) {
-                                scope.launch {
-                                    repo.insertMessage(
-                                        ChatMessageEntity(
-                                            sessionId = activeSessionId,
-                                            role = "model",
-                                            content = outcome.summary,
-                                            timestamp = System.currentTimeMillis()
-                                        )
-                                    )
-                                }
-                            }
-                        }
-                    }
-                )
-
-                // Return immediately to listening so mic is NEVER deaf!
+                turnManager.setTaskRunning(true, routeDecision.goal)
                 _sessionState.value = VoiceSessionState.LISTENING
-                _liveSubtitle.value = "LISTENING"
+                _liveSubtitle.value = "Executing..."
+
+                scope.launch {
+                    try {
+                        val plan = com.example.util.AutonomousScreenAgent.planTask(context, routeDecision.goal)
+                        if (plan.steps.isNotEmpty()) {
+                            com.example.util.AutonomousScreenAgent.executeTaskPlan(context, plan) { step, msg ->
+                                enqueueSentenceForSpeech(msg)
+                                playNextSentenceIfAvailable()
+                            }
+                            val summary = "Ji sir, sabhi tasks execute kar diye gaye hain."
+                            enqueueSentenceForSpeech(summary)
+                            playNextSentenceIfAvailable()
+
+                            if (activeSessionId != null) {
+                                repo.insertMessage(
+                                    ChatMessageEntity(
+                                        sessionId = activeSessionId,
+                                        role = "model",
+                                        content = summary,
+                                        timestamp = System.currentTimeMillis()
+                                    )
+                                )
+                            }
+                        } else {
+                            // Fallback to PhoneAgentRuntime
+                            com.example.agent.PhoneAgentRuntime.submit(
+                                goal = routeDecision.goal,
+                                listener = object : com.example.agent.AgentListener {
+                                    override fun onMilestone(text: String) {
+                                        enqueueSentenceForSpeech(text)
+                                        playNextSentenceIfAvailable()
+                                    }
+
+                                    override fun onAskUser(question: String, options: List<String>?) {
+                                        enqueueSentenceForSpeech(question)
+                                        playNextSentenceIfAvailable()
+                                    }
+
+                                    override fun onFinished(outcome: com.example.agent.AgentOutcome) {
+                                        enqueueSentenceForSpeech(outcome.summary)
+                                        playNextSentenceIfAvailable()
+
+                                        if (activeSessionId != null && outcome.summary.isNotBlank()) {
+                                            scope.launch {
+                                                repo.insertMessage(
+                                                    ChatMessageEntity(
+                                                        sessionId = activeSessionId,
+                                                        role = "model",
+                                                        content = outcome.summary,
+                                                        timestamp = System.currentTimeMillis()
+                                                    )
+                                                )
+                                            }
+                                        }
+                                    }
+                                }
+                            )
+                        }
+                    } catch (e: Exception) {
+                        Log.e(TAG, "Task execution failed: ${e.message}", e)
+                        enqueueSentenceForSpeech("Task execute karne me dikkat aayi sir.")
+                        playNextSentenceIfAvailable()
+                    } finally {
+                        lastExecutedGoal = routeDecision.goal.trim().lowercase()
+                        lastTaskCompletionTime = System.currentTimeMillis()
+                        turnManager.setTaskRunning(false, "")
+                        _liveSubtitle.value = "LISTENING"
+                        turnManager.transitionTo(TurnState.LISTENING)
+                    }
+                }
                 return
             }
 
+            // Normal conversational chat
+            turnManager.transitionTo(TurnState.THINKING)
             _sessionState.value = VoiceSessionState.PROCESSING
             _liveSubtitle.value = "THINKING"
 
-            // Construct System Prompt with Automation Actions + Smart Memory + Spoken Polish
+            val recentEntities = if (activeSessionId != null) {
+                repo.getRecentMessages(activeSessionId, 12)
+            } else {
+                emptyList()
+            }
+            val conversationHistory = recentEntities.map { entity ->
+                Pair(if (entity.role == "user") "user" else "model", entity.content)
+            }
+
             val memoryBlock = SmartConversationMemory.buildMemoryPromptBlock()
             val service = SaifAccessibilityService.instance
             val activeApp = service?.getCurrentAppLabel(context) ?: "Home Screen"
             val currentPkg = service?.getCurrentPackage() ?: ""
+            val screenHierarchy = service?.inspectScreenHierarchy()?.take(1600) ?: ""
 
             val fullSystemPrompt = """
-You are SAIF AI, an advanced, ultra-capable real-time Android voice assistant.
+You are SAIF AI, an advanced real-time Android voice assistant.
 $memoryBlock
 
 CURRENT ACTIVE SCREEN: You are currently on the screen of '$activeApp' (Package: $currentPkg).
-
+${if (screenHierarchy.isNotBlank()) "VISIBLE SCREEN CONTENT:\n$screenHierarchy\n" else ""}
 AUTONOMOUS DEVICE AUTOMATION ACTIONS:
 You have native access to control the Android phone, perform human-like touches, navigate apps, and execute multi-step macros.
 When the user asks to perform device actions or macros, output an action block at the beginning of your response:
@@ -479,7 +470,6 @@ SPOKEN RESPONSE FORMAT:
 - STRICT RULE: NEVER output programming code, Kotlin, Java, markdown blocks, JSON, asterisks, or bullet points in your spoken reply.
 """.trimIndent()
 
-            // Prepare Streaming Speech Queue
             clearStreamingQueue()
             isStreamGenerationComplete.set(false)
 
@@ -488,7 +478,7 @@ SPOKEN RESPONSE FORMAT:
             var isInsideActionBlock = false
 
             val apiResult = AIApiUtility.executeWithFallback(
-                prompt = text,
+                prompt = cleanUtterance,
                 mode = "general",
                 history = conversationHistory,
                 customSystemPrompt = fullSystemPrompt,
@@ -498,10 +488,7 @@ SPOKEN RESPONSE FORMAT:
                     fullModelResponseBuilder.append(chunk)
                     streamingTextBuffer.append(chunk)
 
-                    // Process stream and feed complete sentences to TTS
                     var bufferContent = streamingTextBuffer.toString()
-
-                    // Handle <<<ACTIONS...ACTIONS>>> removal from the spoken buffer
                     if (!isInsideActionBlock && bufferContent.contains("<<<ACTIONS")) {
                         isInsideActionBlock = true
                     }
@@ -512,12 +499,10 @@ SPOKEN RESPONSE FORMAT:
                             streamingTextBuffer.append(bufferContent)
                             isInsideActionBlock = false
                         } else {
-                            // Still waiting for end of actions block
                             return@executeWithFallback
                         }
                     }
 
-                    // Look for complete sentence boundaries in natural speech
                     val sentenceRegex = Regex("""(?<=[.?!।\n])\s+""")
                     val parts = bufferContent.split(sentenceRegex)
 
@@ -528,28 +513,14 @@ SPOKEN RESPONSE FORMAT:
                                 enqueueSentenceForSpeech(sentence)
                             }
                         }
-                        // Keep remaining uncompleted part in the buffer
                         streamingTextBuffer.clear()
                         streamingTextBuffer.append(parts.last())
-                    } else if (bufferContent.length > 55 && bufferContent.contains(",")) {
-                        // For long continuous streams without periods, split at comma
-                        val commaIdx = bufferContent.lastIndexOf(',')
-                        if (commaIdx > 20) {
-                            val sentence = bufferContent.substring(0, commaIdx).trim()
-                            if (sentence.isNotBlank() && !sentence.contains("<<<ACTIONS")) {
-                                enqueueSentenceForSpeech(sentence)
-                            }
-                            val remainder = bufferContent.substring(commaIdx + 1).trimStart()
-                            streamingTextBuffer.clear()
-                            streamingTextBuffer.append(remainder)
-                        }
                     }
                 }
             )
 
             isStreamGenerationComplete.set(true)
 
-            // Any remaining spoken text in buffer
             var remainingText = streamingTextBuffer.toString().trim()
             if (remainingText.contains("ACTIONS>>>")) {
                 remainingText = remainingText.substringAfter("ACTIONS>>>").trim()
@@ -560,44 +531,27 @@ SPOKEN RESPONSE FORMAT:
 
             val rawReply = apiResult.getOrNull()
                 ?: fullModelResponseBuilder.toString().ifBlank {
-                    GeminiService.generateLocalSmartResponse(text, "general")
+                    val err = apiResult.exceptionOrNull()?.message ?: "Network error"
+                    "Maaf kijiye, AI service se response nahi mila. Kripya apna API key ya internet connection check karein."
                 }
 
-            // Parse any dynamic AI actions emitted in response
-            var actionAnnouncement: String? = null
-            val parsed = DeviceActionParser.parse(rawReply, text)
+            val parsed = DeviceActionParser.parse(rawReply, cleanUtterance)
             if (parsed.actions.isNotEmpty()) {
                 val actionResults = DeviceActionManager.executeActionsSequentially(context, parsed.actions)
                 if (parsed.actions.any { it is DeviceAction.ReadNotifications }) {
                     val notifResult = actionResults.firstOrNull {
-                        it.contains("notification", ignoreCase = true) || it.contains("SMS", ignoreCase = true) || it.contains("messages", ignoreCase = true)
+                        it.contains("notification", ignoreCase = true) || it.contains("SMS", ignoreCase = true)
                     } ?: DeviceActionManager.readNotificationsSummary(context, null)
                     if (!notifResult.isNullOrBlank()) {
                         enqueueSentenceForSpeech(notifResult)
                     }
-                } else if (parsed.actions.any { it is DeviceAction.InspectScreen }) {
-                    val inspectResult = actionResults.firstOrNull { it.contains("Active screen", ignoreCase = true) }
-                    if (!inspectResult.isNullOrBlank()) {
-                        enqueueSentenceForSpeech(inspectResult)
-                    }
-                } else {
-                    val macroResult = actionResults.firstOrNull { it.isNotBlank() && !it.startsWith("Error:") }
-                    if (!macroResult.isNullOrBlank()) {
-                        actionAnnouncement = macroResult
-                    }
                 }
             }
 
-            val parsedFallback = DeviceActionParser.parse(rawReply, text)
-            val cleanCompleteReply = if (!actionAnnouncement.isNullOrBlank() && (parsedFallback.cleanSpokenText.isBlank() || parsedFallback.cleanSpokenText == rawReply)) {
-                actionAnnouncement
-            } else {
-                parsedFallback.cleanSpokenText.ifBlank {
-                    if (parsedFallback.actions.isNotEmpty()) "Theek hai sir, sabhi tasks execute kar diye hain." else rawReply
-                }
+            val cleanCompleteReply = parsed.cleanSpokenText.ifBlank {
+                if (parsed.actions.isNotEmpty()) "Theek hai sir, action execute kar diya hai." else rawReply
             }
 
-            // Save AI reply to Room DB
             if (activeSessionId != null && cleanCompleteReply.isNotBlank()) {
                 repo.insertMessage(
                     ChatMessageEntity(
@@ -609,12 +563,10 @@ SPOKEN RESPONSE FORMAT:
                 )
             }
 
-            // If nothing was enqueued for speech, speak cleanCompleteReply
             if (speechQueue.isEmpty() && !isPlayingQueueItem.get()) {
                 enqueueSentenceForSpeech(cleanCompleteReply)
             }
 
-            // Trigger player if not yet playing
             playNextSentenceIfAvailable()
 
         } catch (e: Exception) {
@@ -623,8 +575,9 @@ SPOKEN RESPONSE FORMAT:
                 return
             }
             Log.e(TAG, "Error in processAudioTurn: ${e.message}", e)
-            _liveSubtitle.value = "Listening..."
+            _liveSubtitle.value = "LISTENING"
             _sessionState.value = VoiceSessionState.LISTENING
+            turnManager.transitionTo(TurnState.LISTENING)
         }
     }
 
@@ -642,6 +595,7 @@ SPOKEN RESPONSE FORMAT:
         if (isPlayingQueueItem.compareAndSet(false, true)) {
             val nextSentence = speechQueue.poll()
             if (nextSentence != null) {
+                turnManager.transitionTo(TurnState.SPEAKING)
                 _sessionState.value = VoiceSessionState.SPEAKING
                 isTtsSpeaking = true
                 _liveSubtitle.value = nextSentence
@@ -658,11 +612,9 @@ SPOKEN RESPONSE FORMAT:
                     },
                     onDone = {
                         isPlayingQueueItem.set(false)
-                        // If more sentences exist, play immediately
                         if (speechQueue.isNotEmpty()) {
                             playNextSentenceIfAvailable()
                         } else if (isStreamGenerationComplete.get()) {
-                            // Turn finished completely! Return to LISTENING seamlessly.
                             onSpeechPlaybackComplete()
                         }
                     }
@@ -683,9 +635,10 @@ SPOKEN RESPONSE FORMAT:
         _amplitude.value = 0f
 
         if (_sessionState.value == VoiceSessionState.SPEAKING) {
+            turnManager.transitionTo(TurnState.LISTENING)
             _sessionState.value = VoiceSessionState.LISTENING
-            _liveSubtitle.value = "LISTENING"
-            vad.reset()
+            _liveSubtitle.value = if (turnManager.isTaskRunning.value) "Executing..." else "LISTENING"
+            vadGate.reset()
         }
     }
 
@@ -705,30 +658,26 @@ SPOKEN RESPONSE FORMAT:
     }
 
     suspend fun transcribeWav(apiKey: String, base64Audio: String, rawWavBytes: ByteArray): Result<String> {
-        return AudioTranscriptionEngine.transcribeWav(apiKey, base64Audio, rawWavBytes)
+        return AudioTranscriptionEngine.transcribeWav(apiKey, base64Audio, rawWavBytes, context)
     }
 
     fun stopSpeaking(causedByUserInterruption: Boolean = false) {
         isTtsSpeaking = false
         isStreamGenerationComplete.set(true)
-        if (causedByUserInterruption) {
-            lastTtsFinishTime = 0L // No cooldown, immediately allow user speech input!
-        } else {
-            lastTtsFinishTime = System.currentTimeMillis()
-        }
+        lastTtsFinishTime = if (causedByUserInterruption) 0L else System.currentTimeMillis()
         clearStreamingQueue()
         TTSManager.stop()
         animationJob?.cancel()
-        // When speech is interrupted by voice barge-in, silence the TTS, but do NOT abort background device execution
         if (!causedByUserInterruption) {
             processingJob?.cancel()
             isProcessingTurn.set(false)
         }
-        vad.reset()
+        vadGate.reset()
 
+        turnManager.transitionTo(TurnState.LISTENING)
         _sessionState.value = VoiceSessionState.LISTENING
         _amplitude.value = 0f
-        _liveSubtitle.value = "Listening..."
+        _liveSubtitle.value = if (turnManager.isTaskRunning.value) "Executing..." else "Listening..."
     }
 
     fun stop() {
@@ -740,32 +689,21 @@ SPOKEN RESPONSE FORMAT:
         animationJob?.cancel()
 
         try {
-            audioManager?.mode = android.media.AudioManager.MODE_NORMAL
+            audioPipeline?.stop()
+            audioPipeline = null
+        } catch (e: Exception) {
+            Log.w(TAG, "AudioPipeline stop error: ${e.message}")
+        }
+
+        try {
+            audioManager?.mode = AudioManager.MODE_NORMAL
             audioManager?.isSpeakerphoneOn = false
         } catch (e: Exception) {
             Log.w(TAG, "Audio manager reset error: ${e.message}")
         }
 
-        try {
-            audioRecord?.stop()
-            audioRecord?.release()
-        } catch (e: Exception) {
-            Log.w(TAG, "AudioRecord release error: ${e.message}")
-        }
-        audioRecord = null
-
-        try {
-            echoCanceler?.release()
-            noiseSuppressor?.release()
-            gainControl?.release()
-        } catch (e: Exception) {
-            Log.w(TAG, "AudioFx release error: ${e.message}")
-        }
-        echoCanceler = null
-        noiseSuppressor = null
-        gainControl = null
-
         TTSManager.stop()
+        turnManager.transitionTo(TurnState.IDLE)
         _sessionState.value = VoiceSessionState.IDLE
         _amplitude.value = 0f
 
