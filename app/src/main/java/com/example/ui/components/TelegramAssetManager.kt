@@ -81,9 +81,9 @@ data class VideoEdlPlan(
 object TelegramAssetManager {
     private const val TAG = "TelegramAssetManager"
 
-    // Default Configuration from spec
-    const val DEFAULT_BOT_TOKEN = "8946744201:AAEaeNw2QZKUnRRS31z_61qMbFRbycUvniA"
-    const val DEFAULT_CHANNEL_ID = "-1002181329582"
+    // Bot token and Channel ID are loaded securely from BuildConfig / Settings in Level 6
+    const val DEFAULT_BOT_TOKEN = ""
+    const val DEFAULT_CHANNEL_ID = ""
 
     private val httpClient = OkHttpClient.Builder()
         .connectTimeout(30, TimeUnit.SECONDS)

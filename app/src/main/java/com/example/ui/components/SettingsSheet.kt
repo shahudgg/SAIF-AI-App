@@ -44,6 +44,9 @@ import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.LockOpen
+import androidx.compose.material.icons.filled.Security
+import androidx.compose.material.icons.filled.GraphicEq
+import androidx.compose.material.icons.filled.ScreenShare
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
@@ -92,14 +95,14 @@ data class VoiceProfile(
 
 val VOICE_PROFILES = listOf(
     VoiceProfile(
-        id = "Fenrir",
+        id = "Kabir",
         name = "Kabir",
         description = "Deep, confident, podcast baritone (Hindi & English)",
         emotion = "🎙️ Deep & Calm",
         gender = "Male",
-        pitch = 0.88f,
+        pitch = 0.90f,
         speechRate = 0.95f,
-        previewHinglish = "Hello. Mai Kabir hoon. Har topic ko deeply, smoothly aur confidently explain karna mera style hai.",
+        previewHinglish = "Namaste! Mai Kabir hoon. Har baat ko deeply, smoothly aur bina kisi rukawat ke explain karna mera style hai.",
         previewEnglish = "Greetings. I am Kabir. Here to provide thoughtful, authoritative guidance.",
         targetEngineNameMatches = listOf("en-in-x-end-network", "en-in-x-ene-local", "hi-in-x-hia-network", "hi-in-x-hia-local", "en_in", "hi_in")
     ),
@@ -109,7 +112,7 @@ val VOICE_PROFILES = listOf(
         description = "Cheerful, sweet, bubbly & joyful (Hindi & English)",
         emotion = "✨ Cheerful & Sweet",
         gender = "Female",
-        pitch = 1.10f,
+        pitch = 1.12f,
         speechRate = 0.98f,
         previewHinglish = "Hi there! Mai Priya hoon! Aaiye milkar kuch naya, super interesting aur mazedaar banate hain!",
         previewEnglish = "Hi there! I am Priya, ready to bring creativity and joy to every task!",
@@ -142,8 +145,8 @@ fun SettingsSheet(
     var wakeWordPresets by remember { mutableStateOf(com.example.util.WakeWordManager.getPresets(context)) }
 
     var selectedVoiceId by remember { 
-        val saved = prefs.getString("selected_voice_id", "Fenrir") ?: "Fenrir"
-        mutableStateOf(if (saved == "Priya") "Priya" else "Fenrir")
+        val saved = prefs.getString("selected_voice_id", "Kabir") ?: "Kabir"
+        mutableStateOf(if (saved == "Priya") "Priya" else "Kabir")
     }
     var ttsVoices by remember { mutableStateOf(VOICE_PROFILES) }
     var ttsInstance by remember { mutableStateOf<android.speech.tts.TextToSpeech?>(null) }
@@ -630,7 +633,7 @@ fun SettingsSheet(
                                 customWakeWordInput = it 
                                 wakeWordSavedFeedback = false
                             },
-                            placeholder = { Text("e.g. Hey Saif, Hey Jarvis", fontSize = 13.sp, color = SaifTheme.colors.textSecondary) },
+                            placeholder = { Text("e.g. Hey Saif, Hello Saif", fontSize = 13.sp, color = SaifTheme.colors.textSecondary) },
                             singleLine = true,
                             shape = RoundedCornerShape(12.dp),
                             colors = OutlinedTextFieldDefaults.colors(
@@ -1091,6 +1094,239 @@ fun SettingsSheet(
             Spacer(modifier = Modifier.height(32.dp))
             SectionHeader("AI PROVIDER & MODELS")
             AiProviderSettingsInline()
+            Spacer(modifier = Modifier.height(32.dp))
+            SectionHeader("LIVE BAATCHEET & SCREEN SHARE SETTINGS")
+
+            var privacyShieldEnabled by remember {
+                mutableStateOf(generalPrefs.getBoolean("privacyShieldEnabled", true))
+            }
+            var screenShareQuality by remember {
+                mutableStateOf(generalPrefs.getString("screenShareQuality", "High (768p)") ?: "High (768p)")
+            }
+            var voiceBargeInEnabled by remember {
+                mutableStateOf(generalPrefs.getBoolean("voiceBargeInEnabled", true))
+            }
+            var orbStyleSelection by remember {
+                mutableStateOf(generalPrefs.getString("orbStyleSelection", "Sparkle Star") ?: "Sparkle Star")
+            }
+
+            LiquidSurface(
+                color = SaifTheme.colors.surfaceCard,
+                glassBorderBrush = glassBorderBrush,
+                shape = RoundedCornerShape(16.dp),
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Column {
+                    // Privacy Shield Switch
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(16.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Box(
+                            modifier = Modifier
+                                .size(36.dp)
+                                .clip(CircleShape)
+                                .background(Color(0xFF10B981).copy(alpha = 0.15f)),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.Security,
+                                contentDescription = null,
+                                tint = Color(0xFF10B981),
+                                modifier = Modifier.size(20.dp)
+                            )
+                        }
+                        Spacer(modifier = Modifier.width(14.dp))
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                text = "Privacy Shield (प्राइवेसी शील्ड)",
+                                fontSize = 15.sp,
+                                fontWeight = FontWeight.SemiBold,
+                                color = SaifTheme.colors.textPrimary
+                            )
+                            Text(
+                                text = "Banking, UPI aur password apps me screen sharing auto-pause karein",
+                                fontSize = 12.sp,
+                                color = SaifTheme.colors.textSecondary
+                            )
+                        }
+                        Switch(
+                            checked = privacyShieldEnabled,
+                            onCheckedChange = {
+                                privacyShieldEnabled = it
+                                generalPrefs.edit().putBoolean("privacyShieldEnabled", it).apply()
+                            },
+                            colors = SwitchDefaults.colors(
+                                checkedThumbColor = Color.White,
+                                checkedTrackColor = Color(0xFF10B981),
+                                uncheckedThumbColor = SaifTheme.colors.textSecondary,
+                                uncheckedTrackColor = SaifTheme.colors.primaryBackground
+                            )
+                        )
+                    }
+
+                    HorizontalDivider(color = SaifTheme.colors.cardBorder)
+
+                    // Voice Barge-in Switch
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(16.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Box(
+                            modifier = Modifier
+                                .size(36.dp)
+                                .clip(CircleShape)
+                                .background(PrimaryAccent.copy(alpha = 0.15f)),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.GraphicEq,
+                                contentDescription = null,
+                                tint = PrimaryAccent,
+                                modifier = Modifier.size(20.dp)
+                            )
+                        }
+                        Spacer(modifier = Modifier.width(14.dp))
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                text = "Instant Barge-in (बोलकर टोकना)",
+                                fontSize = 15.sp,
+                                fontWeight = FontWeight.SemiBold,
+                                color = SaifTheme.colors.textPrimary
+                            )
+                            Text(
+                                text = "AI ke bolte waqt aap bol kar use turant rok sakte hain",
+                                fontSize = 12.sp,
+                                color = SaifTheme.colors.textSecondary
+                            )
+                        }
+                        Switch(
+                            checked = voiceBargeInEnabled,
+                            onCheckedChange = {
+                                voiceBargeInEnabled = it
+                                generalPrefs.edit().putBoolean("voiceBargeInEnabled", it).apply()
+                            },
+                            colors = SwitchDefaults.colors(
+                                checkedThumbColor = Color.White,
+                                checkedTrackColor = PrimaryAccent,
+                                uncheckedThumbColor = SaifTheme.colors.textSecondary,
+                                uncheckedTrackColor = SaifTheme.colors.primaryBackground
+                            )
+                        )
+                    }
+
+                    HorizontalDivider(color = SaifTheme.colors.cardBorder)
+
+                    // Screen Share Quality Selection
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(16.dp)
+                    ) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Icon(
+                                imageVector = Icons.Default.ScreenShare,
+                                contentDescription = null,
+                                tint = Color(0xFF38BDF8),
+                                modifier = Modifier.size(18.dp)
+                            )
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Text(
+                                text = "Screen Streaming Quality",
+                                fontSize = 14.sp,
+                                fontWeight = FontWeight.SemiBold,
+                                color = SaifTheme.colors.textPrimary
+                            )
+                        }
+                        Spacer(modifier = Modifier.height(10.dp))
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            listOf("High (768p)", "Balanced (540p)", "Data Saver").forEach { quality ->
+                                val selected = screenShareQuality == quality
+                                Surface(
+                                    onClick = {
+                                        screenShareQuality = quality
+                                        generalPrefs.edit().putString("screenShareQuality", quality).apply()
+                                    },
+                                    shape = RoundedCornerShape(10.dp),
+                                    color = if (selected) Color(0xFF0284C7).copy(alpha = 0.25f) else SaifTheme.colors.primaryBackground,
+                                    border = BorderStroke(1.dp, if (selected) Color(0xFF38BDF8) else SaifTheme.colors.cardBorder),
+                                    modifier = Modifier.weight(1f)
+                                ) {
+                                    Text(
+                                        text = quality,
+                                        fontSize = 11.sp,
+                                        fontWeight = if (selected) FontWeight.Bold else FontWeight.Normal,
+                                        color = if (selected) Color(0xFF38BDF8) else SaifTheme.colors.textSecondary,
+                                        textAlign = TextAlign.Center,
+                                        modifier = Modifier.padding(vertical = 8.dp)
+                                    )
+                                }
+                            }
+                        }
+                    }
+
+                    HorizontalDivider(color = SaifTheme.colors.cardBorder)
+
+                    // Floating Orb Style Selection
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(16.dp)
+                    ) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Icon(
+                                imageVector = Icons.Default.Computer,
+                                contentDescription = null,
+                                tint = Color(0xFFA855F7),
+                                modifier = Modifier.size(18.dp)
+                            )
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Text(
+                                text = "Floating Orb Style (अवतार स्टाइल)",
+                                fontSize = 14.sp,
+                                fontWeight = FontWeight.SemiBold,
+                                color = SaifTheme.colors.textPrimary
+                            )
+                        }
+                        Spacer(modifier = Modifier.height(10.dp))
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            listOf("Sparkle Star", "Cyber Glow", "Quantum Ripple").forEach { orb ->
+                                val selected = orbStyleSelection == orb
+                                Surface(
+                                    onClick = {
+                                        orbStyleSelection = orb
+                                        generalPrefs.edit().putString("orbStyleSelection", orb).apply()
+                                    },
+                                    shape = RoundedCornerShape(10.dp),
+                                    color = if (selected) Color(0xFFA855F7).copy(alpha = 0.25f) else SaifTheme.colors.primaryBackground,
+                                    border = BorderStroke(1.dp, if (selected) Color(0xFFA855F7) else SaifTheme.colors.cardBorder),
+                                    modifier = Modifier.weight(1f)
+                                ) {
+                                    Text(
+                                        text = orb,
+                                        fontSize = 11.sp,
+                                        fontWeight = if (selected) FontWeight.Bold else FontWeight.Normal,
+                                        color = if (selected) Color(0xFFC084FC) else SaifTheme.colors.textSecondary,
+                                        textAlign = TextAlign.Center,
+                                        modifier = Modifier.padding(vertical = 8.dp)
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
             Spacer(modifier = Modifier.height(32.dp))
 
             // Permission Manager Section

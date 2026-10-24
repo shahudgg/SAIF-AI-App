@@ -450,6 +450,23 @@ The video timeline has been assembled with multi-track clips, audio BGM, sound e
 
             // 1. Direct Autonomous Device Task Intercept:
             // Prevents generic LLM refusal messages from leaking onto the user's screen!
+            if (base64Images.isEmpty() && com.example.util.JarvisMultiCommandEngine.hasJarvisCommand(trimmed)) {
+                val multiResult = com.example.util.JarvisMultiCommandEngine.executeCompoundPrompt(context, trimmed)
+                if (multiResult.handled) {
+                    val aiMsg = ChatMessageEntity(
+                        sessionId = sessionId,
+                        role = "model",
+                        content = multiResult.summaryFeedback
+                    )
+                    repository.insertMessage(aiMsg)
+
+                    if (multiResult.remainingAiQuery == null) {
+                        _isGenerating.value = false
+                        return@launch
+                    }
+                }
+            }
+
             val isAutonomous = com.example.util.AutonomousScreenAgent.isAutonomousDeviceTask(trimmed)
             if (isAutonomous && base64Images.isEmpty()) {
                 val cleanConfirmation = when {
@@ -502,11 +519,10 @@ The video timeline has been assembled with multi-track clips, audio BGM, sound e
             val service = com.example.util.SaifAccessibilityService.instance
             val isScreenQuery = trimmed.contains("screen", ignoreCase = true) ||
                     trimmed.contains("kya dikh raha", ignoreCase = true) ||
-                    trimmed.contains("kya chal raha", ignoreCase = true)
-            val screenContextInfo = if (isScreenQuery && service != null) {
-                val app = service.getCurrentAppLabel(context)
-                val hier = service.inspectScreenHierarchy().take(2200)
-                "\n\n[LIVE SCREEN ACCESS: Active App is '$app'. Visible elements:\n$hier]"
+                    trimmed.contains("kya chal raha", ignoreCase = true) ||
+                    trimmed.contains("where am i", ignoreCase = true)
+            val screenContextInfo = if (isScreenQuery) {
+                "\n\n" + com.example.util.JarvisScreenObserver.getCurrentScreenContextSummary()
             } else ""
 
             val promptToSend = effectivePrompt + screenContextInfo

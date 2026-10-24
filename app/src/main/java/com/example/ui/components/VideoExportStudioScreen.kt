@@ -1,9 +1,12 @@
 package com.example.ui.components
 
+import android.content.Intent
+import android.net.Uri
 import android.widget.Toast
 import androidx.compose.animation.*
 import androidx.compose.animation.core.*
 import androidx.compose.foundation.*
+import com.example.util.AndroidVideoExportEngine
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -58,6 +61,13 @@ fun VideoExportStudioScreen(
     var renderProgress by remember { mutableFloatStateOf(0f) }
     var renderPassText by remember { mutableStateOf("Pass 1: Neural Upscaling...") }
     var isExportComplete by remember { mutableStateOf(false) }
+    var exportResult by remember { mutableStateOf<AndroidVideoExportEngine.ExportResult?>(null) }
+
+    var selectedFormat by remember { mutableStateOf("MP4") }
+    var selectedBitrateTier by remember { mutableStateOf("High") }
+    var currentRenderFrame by remember { mutableIntStateOf(0) }
+    var totalRenderFrames by remember { mutableIntStateOf(100) }
+    var renderEtaSeconds by remember { mutableIntStateOf(6) }
 
     val activeClip = project.clips.firstOrNull()
 
@@ -343,6 +353,82 @@ fun VideoExportStudioScreen(
                 }
             }
 
+            Spacer(modifier = Modifier.height(14.dp))
+
+            // Container Format & Bitrate Row
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 16.dp),
+                horizontalArrangement = Arrangement.spacedBy(12.dp)
+            ) {
+                // Format
+                Column(modifier = Modifier.weight(1f)) {
+                    Text("Container Format", color = Color.White, fontSize = 13.5.sp, fontWeight = FontWeight.SemiBold)
+                    Spacer(modifier = Modifier.height(6.dp))
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(10.dp))
+                            .background(Color(0xFF1C1B1B))
+                            .padding(3.dp),
+                        horizontalArrangement = Arrangement.spacedBy(4.dp)
+                    ) {
+                        listOf("MP4", "GIF", "ProRes").forEach { fmt ->
+                            val isSelected = selectedFormat == fmt
+                            Surface(
+                                onClick = { selectedFormat = fmt },
+                                shape = RoundedCornerShape(8.dp),
+                                color = if (isSelected) Color(0xFF7B2BFF) else Color.Transparent,
+                                modifier = Modifier.weight(1f)
+                            ) {
+                                Text(
+                                    text = fmt,
+                                    color = if (isSelected) Color.White else Color(0xFFCCC3D9),
+                                    fontSize = 11.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    textAlign = androidx.compose.ui.text.style.TextAlign.Center,
+                                    modifier = Modifier.padding(vertical = 6.dp)
+                                )
+                            }
+                        }
+                    }
+                }
+
+                // Bitrate Quality
+                Column(modifier = Modifier.weight(1f)) {
+                    Text("Bitrate Profile", color = Color.White, fontSize = 13.5.sp, fontWeight = FontWeight.SemiBold)
+                    Spacer(modifier = Modifier.height(6.dp))
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(10.dp))
+                            .background(Color(0xFF1C1B1B))
+                            .padding(3.dp),
+                        horizontalArrangement = Arrangement.spacedBy(4.dp)
+                    ) {
+                        listOf("Standard", "High", "Cinema").forEach { bit ->
+                            val isSelected = selectedBitrateTier == bit
+                            Surface(
+                                onClick = { selectedBitrateTier = bit },
+                                shape = RoundedCornerShape(8.dp),
+                                color = if (isSelected) Color(0xFF00707D) else Color.Transparent,
+                                modifier = Modifier.weight(1f)
+                            ) {
+                                Text(
+                                    text = bit,
+                                    color = if (isSelected) Color.White else Color(0xFFCCC3D9),
+                                    fontSize = 10.5.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    textAlign = androidx.compose.ui.text.style.TextAlign.Center,
+                                    modifier = Modifier.padding(vertical = 6.dp)
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+
             Spacer(modifier = Modifier.height(18.dp))
 
             // 4. Smart Export Toggles
@@ -485,33 +571,148 @@ fun VideoExportStudioScreen(
                 Spacer(modifier = Modifier.height(20.dp))
             }
 
-            // 6. Big Export Action Button
+            // 6. Big Export Action Button & Post-Export Success Actions
             Column(
                 modifier = Modifier
                     .fillMaxWidth()
                     .padding(horizontal = 16.dp),
                 horizontalAlignment = Alignment.CenterHorizontally
             ) {
+                if (isExportComplete && exportResult != null && exportResult?.success == true) {
+                    val result = exportResult!!
+                    Surface(
+                        shape = RoundedCornerShape(18.dp),
+                        color = Color(0xFF192A24),
+                        border = BorderStroke(1.5.dp, Color(0xFF10B981)),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(bottom = 12.dp)
+                    ) {
+                        Column(modifier = Modifier.padding(16.dp)) {
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Icon(Icons.Default.CheckCircle, contentDescription = null, tint = Color(0xFF10B981), modifier = Modifier.size(24.dp))
+                                Spacer(modifier = Modifier.width(8.dp))
+                                Column {
+                                    Text("Saved to Phone Gallery / Camera Roll!", color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.Bold)
+                                    Text("Movies/SaifAiStudio/${result.fileName}", color = Color(0xFF6EE7B7), fontSize = 11.sp, fontFamily = FontFamily.Monospace)
+                                }
+                            }
+
+                            Spacer(modifier = Modifier.height(10.dp))
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                            ) {
+                                Text("Res: ${result.resolution}", color = Color(0xFFD1BCFF), fontSize = 11.sp)
+                                Text("·", color = Color.Gray, fontSize = 11.sp)
+                                Text("Size: ${"%.1f".format(result.fileSizeMb)} MB", color = Color(0xFFD1BCFF), fontSize = 11.sp)
+                                Text("·", color = Color.Gray, fontSize = 11.sp)
+                                Text("Dur: ${"%.1f".format(result.durationSeconds)}s", color = Color(0xFFD1BCFF), fontSize = 11.sp)
+                            }
+
+                            Spacer(modifier = Modifier.height(14.dp))
+
+                            // Action Buttons: Open Video & Share Video
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                            ) {
+                                // Open Video in System Player / Gallery
+                                Button(
+                                    onClick = {
+                                        val uri = result.contentUri
+                                        if (uri != null) {
+                                            try {
+                                                val intent = Intent(Intent.ACTION_VIEW).apply {
+                                                    setDataAndType(uri, "video/mp4")
+                                                    addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                                                }
+                                                context.startActivity(intent)
+                                            } catch (_: Exception) {
+                                                Toast.makeText(context, "Saved in Movies/SaifAiStudio", Toast.LENGTH_SHORT).show()
+                                            }
+                                        } else {
+                                            Toast.makeText(context, "Saved in Movies/SaifAiStudio", Toast.LENGTH_SHORT).show()
+                                        }
+                                    },
+                                    shape = RoundedCornerShape(12.dp),
+                                    colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF10B981)),
+                                    modifier = Modifier.weight(1f).height(44.dp)
+                                ) {
+                                    Icon(Icons.Default.PlayArrow, contentDescription = null, tint = Color.White, modifier = Modifier.size(18.dp))
+                                    Spacer(modifier = Modifier.width(4.dp))
+                                    Text("Play Video", color = Color.White, fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                                }
+
+                                // Share Video to other apps
+                                Button(
+                                    onClick = {
+                                        val uri = result.contentUri
+                                        if (uri != null) {
+                                            try {
+                                                val shareIntent = Intent(Intent.ACTION_SEND).apply {
+                                                    type = "video/mp4"
+                                                    putExtra(Intent.EXTRA_STREAM, uri)
+                                                    addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                                                }
+                                                context.startActivity(Intent.createChooser(shareIntent, "Share Saif AI Video"))
+                                            } catch (_: Exception) {
+                                                Toast.makeText(context, "Ready to share from Gallery", Toast.LENGTH_SHORT).show()
+                                            }
+                                        }
+                                    },
+                                    shape = RoundedCornerShape(12.dp),
+                                    colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF7B2BFF)),
+                                    modifier = Modifier.weight(1f).height(44.dp)
+                                ) {
+                                    Icon(Icons.Default.Share, contentDescription = null, tint = Color.White, modifier = Modifier.size(16.dp))
+                                    Spacer(modifier = Modifier.width(4.dp))
+                                    Text("Share", color = Color.White, fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                                }
+                            }
+                        }
+                    }
+                }
+
                 Button(
                     onClick = {
                         if (!isRendering) {
                             isRendering = true
                             renderProgress = 0f
                             isExportComplete = false
+                            currentRenderFrame = 0
+                            renderEtaSeconds = 8
                             scope.launch {
-                                for (p in 5..100 step 5) {
-                                    delay(100)
-                                    renderProgress = p / 100f
-                                    if (p in 30..69) {
-                                        renderPassText = "Pass 2: Encoding $selectedCodec Stream..."
-                                    } else if (p >= 70) {
-                                        renderPassText = "Pass 3: Finalizing Audio Mux & Metadata..."
+                                val res = AndroidVideoExportEngine.exportProjectToGallery(
+                                    context = context,
+                                    project = project,
+                                    targetResolution = selectedRes,
+                                    targetFps = selectedFps,
+                                    codec = selectedCodec,
+                                    exportFormat = selectedFormat,
+                                    bitrateTier = selectedBitrateTier,
+                                    isWatermarkEnabled = isWatermarkEnabled,
+                                    onProgress = { p, status ->
+                                        renderProgress = p
+                                        renderPassText = status
+                                    },
+                                    onProgressWithMetrics = { p, status, frame, total, eta ->
+                                        renderProgress = p
+                                        renderPassText = status
+                                        currentRenderFrame = frame
+                                        totalRenderFrames = total
+                                        renderEtaSeconds = eta
                                     }
-                                }
+                                )
                                 delay(300)
                                 isRendering = false
-                                isExportComplete = true
-                                Toast.makeText(context, "✅ Video exported & saved to Gallery / Camera Roll!", Toast.LENGTH_LONG).show()
+                                exportResult = res
+                                isExportComplete = res.success
+                                if (res.success) {
+                                    Toast.makeText(context, "✅ $selectedFormat exported & saved to Gallery!", Toast.LENGTH_LONG).show()
+                                } else {
+                                    Toast.makeText(context, "Export issue: ${res.errorMessage ?: "Retry"}", Toast.LENGTH_LONG).show()
+                                }
                             }
                         }
                     },
@@ -531,7 +732,7 @@ fun VideoExportStudioScreen(
                     )
                     Spacer(modifier = Modifier.width(8.dp))
                     Text(
-                        text = if (isExportComplete) "Saved to Camera Roll ✓" else "Export MP4 Now ↑",
+                        text = if (isExportComplete) "Export Again ↑" else "Export $selectedFormat to Gallery Now ↑",
                         color = Color.White,
                         fontSize = 15.sp,
                         fontWeight = FontWeight.Bold
@@ -542,7 +743,7 @@ fun VideoExportStudioScreen(
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Icon(Icons.Default.LockClock, contentDescription = null, tint = Color(0xFF00DAF3), modifier = Modifier.size(13.dp))
                     Spacer(modifier = Modifier.width(4.dp))
-                    Text("Screen on rakho · On-device fast neural rendering", color = Color(0xFFCCC3D9), fontSize = 11.sp)
+                    Text("Auto-saved to Gallery / Camera Roll · No cloud upload needed", color = Color(0xFFCCC3D9), fontSize = 11.sp)
                 }
             }
         }
@@ -575,7 +776,17 @@ fun VideoExportStudioScreen(
                                 modifier = Modifier.size(18.dp)
                             )
                             Spacer(modifier = Modifier.width(10.dp))
-                            Text("Rendering Frames...", color = Color.White, fontSize = 15.sp, fontWeight = FontWeight.Bold)
+                            Column {
+                                Text("Rendering $selectedFormat ($selectedBitrateTier)...", color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.Bold)
+                                if (totalRenderFrames > 0 && currentRenderFrame > 0) {
+                                    Text(
+                                        text = "Frame $currentRenderFrame / $totalRenderFrames",
+                                        color = Color(0xFFCCC3D9),
+                                        fontSize = 10.5.sp,
+                                        fontFamily = FontFamily.Monospace
+                                    )
+                                }
+                            }
                         }
                         Text(
                             text = "${(renderProgress * 100).toInt()}%",
@@ -604,8 +815,23 @@ fun VideoExportStudioScreen(
                         modifier = Modifier.fillMaxWidth(),
                         horizontalArrangement = Arrangement.SpaceBetween
                     ) {
-                        Text(renderPassText, color = Color(0xFFCCC3D9), fontSize = 11.5.sp)
-                        Text("ETA: 00:04", color = Color(0xFFCCC3D9), fontSize = 11.5.sp, fontFamily = FontFamily.Monospace)
+                        Text(
+                            text = renderPassText,
+                            color = Color(0xFFCCC3D9),
+                            fontSize = 11.5.sp,
+                            modifier = Modifier.weight(1f, fill = false)
+                        )
+                        val etaFormatted = if (renderEtaSeconds < 60) {
+                            "ETA: 00:${renderEtaSeconds.toString().padStart(2, '0')}"
+                        } else {
+                            "ETA: ${renderEtaSeconds / 60}:${(renderEtaSeconds % 60).toString().padStart(2, '0')}"
+                        }
+                        Text(
+                            text = etaFormatted,
+                            color = Color(0xFF00DAF3),
+                            fontSize = 11.5.sp,
+                            fontFamily = FontFamily.Monospace
+                        )
                     }
                 }
             }

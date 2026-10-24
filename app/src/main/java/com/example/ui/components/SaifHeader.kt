@@ -61,6 +61,7 @@ fun SaifHeader(
     onToggleBookmarkFilter: () -> Unit,
     onUpgradeClick: () -> Unit,
     onOpenAdminDashboard: () -> Unit = {},
+    onOpenJarvisHud: () -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     // Flowing liquid iridescent text gradient
@@ -170,8 +171,7 @@ fun SaifHeader(
                 // Right side: Admin Crown, Upgrade, Theme, Settings, Purple Video Plus, Orange App Plus
                 Row(
                     verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(4.dp),
-                    modifier = Modifier.horizontalScroll(rememberScrollState())
+                    horizontalArrangement = Arrangement.spacedBy(3.dp)
                 ) {
                     // Admin Crown Button (Shows only for Admin role)
                     val currentAuthUser by com.example.data.local.AuthManager.currentUser.collectAsState()

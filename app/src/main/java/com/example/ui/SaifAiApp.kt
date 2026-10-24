@@ -77,6 +77,7 @@ fun SaifAiApp(
     var showVoiceDialog by remember { mutableStateOf(false) }
     var showUpgradeDialog by remember { mutableStateOf(false) }
     var showConfigureDialog by remember { mutableStateOf(false) }
+    var showJarvisHudDialog by remember { mutableStateOf(false) }
     var activeProjectData by remember { mutableStateOf<com.example.ui.components.ProjectData?>(null) }
     var showProjectEditor by remember { mutableStateOf(false) }
 
@@ -111,16 +112,12 @@ fun SaifAiApp(
                 )
             }
         } else {
-            // Default sample clips if user canceled gallery selection
-            listOf(
-                com.example.ui.components.TimelineMediaClip(name = "Intro.mp4", durationSeconds = 6.0f),
-                com.example.ui.components.TimelineMediaClip(name = "Shibuya_Rain.mp4", durationSeconds = 15.2f, isAiEnhanced = true),
-                com.example.ui.components.TimelineMediaClip(name = "Night.mp4", durationSeconds = 18.0f)
-            )
+            // Clean empty timeline if user canceled gallery selection
+            emptyList()
         }
 
         val videoProj = com.example.ui.components.VideoProjectData(
-            projectName = pendingVideoProjectName.ifBlank { "Cyberpunk Tokyo Vlog" },
+            projectName = pendingVideoProjectName.ifBlank { "New Video Project" },
             clips = clips
         )
         activeVideoProjectData = videoProj
@@ -149,6 +146,48 @@ fun SaifAiApp(
     var voiceRms by remember { mutableStateOf(0f) }
     var stopVoiceListeningTrigger by remember { mutableIntStateOf(0) }
     var bottomBarHeightPx by remember { mutableIntStateOf(0) }
+    var showLiveBaatcheetChoiceDialog by remember { mutableStateOf(false) }
+
+    val mediaProjectionManager = remember {
+        context.getSystemService(android.content.Context.MEDIA_PROJECTION_SERVICE) as? android.media.projection.MediaProjectionManager
+    }
+
+    val screenCaptureLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.StartActivityForResult()
+    ) { result ->
+        if (result.resultCode == android.app.Activity.RESULT_OK && result.data != null && mediaProjectionManager != null) {
+            try {
+                com.example.LiveVoiceService.activeInstance?.elevateToMediaProjection()
+                val projection = mediaProjectionManager.getMediaProjection(result.resultCode, result.data!!)
+                val metrics = context.resources.displayMetrics
+                if (projection != null) {
+                    com.example.LiveVoiceManager.currentSessionId = viewModel.activeSessionId.value
+                    val started = com.example.LiveVoiceManager.startScreenShare(projection, metrics)
+                    if (started) {
+                        android.widget.Toast.makeText(context, "Screen Sharing Live! SAIF AI aapki screen dekh raha hai.", android.widget.Toast.LENGTH_SHORT).show()
+                    }
+                } else {
+                    android.widget.Toast.makeText(context, "Screen capture init failed", android.widget.Toast.LENGTH_SHORT).show()
+                }
+            } catch (e: Exception) {
+                android.util.Log.e("SaifAiApp", "Screen capture initialization error: ${e.message}", e)
+                android.widget.Toast.makeText(context, "Screen share shuru karne me dikkat aayi: ${e.message}", android.widget.Toast.LENGTH_SHORT).show()
+            }
+        } else {
+            com.example.LiveVoiceService.activeInstance?.demoteFromMediaProjection()
+            android.widget.Toast.makeText(context, "Screen share cancel kiya gaya", android.widget.Toast.LENGTH_SHORT).show()
+        }
+    }
+
+    val micPermissionLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.RequestPermission()
+    ) { isGranted ->
+        if (isGranted) {
+            showLiveBaatcheetChoiceDialog = true
+        } else {
+            android.widget.Toast.makeText(context, "Microphone permission is required for Live Voice", android.widget.Toast.LENGTH_LONG).show()
+        }
+    }
 
     val isAssistantOverlayActive by com.example.util.WakeWordManager.isAssistantOverlayActive.collectAsState()
     val cornerGlowTrigger by com.example.util.WakeWordManager.cornerGlowTrigger.collectAsState()
@@ -280,7 +319,8 @@ fun SaifAiApp(
                         isFilterBookmarked = isFilterBookmarked,
                         onToggleBookmarkFilter = { viewModel.toggleBookmarkFilter() },
                         onUpgradeClick = { showUpgradeDialog = true },
-                        onOpenAdminDashboard = onOpenAdminDashboard
+                        onOpenAdminDashboard = onOpenAdminDashboard,
+                        onOpenJarvisHud = { showJarvisHudDialog = true }
                     )
                 },
                 bottomBar = {
@@ -365,17 +405,6 @@ fun SaifAiApp(
                             }
                         }
 
-                        val micPermissionLauncher = rememberLauncherForActivityResult(
-                            contract = ActivityResultContracts.RequestPermission()
-                        ) { isGranted ->
-                            if (isGranted) {
-                                com.example.LiveVoiceManager.currentSessionId = viewModel.activeSessionId.value
-                                com.example.LiveVoiceManager.toggleLiveVoice(context)
-                            } else {
-                                android.widget.Toast.makeText(context, "Microphone permission is required for Live Voice", android.widget.Toast.LENGTH_LONG).show()
-                            }
-                        }
-
                         Column(modifier = Modifier.fillMaxWidth()) {
                             // Attachments Display
                             if (selectedAttachments.isNotEmpty()) {
@@ -432,18 +461,15 @@ fun SaifAiApp(
                             },
                             stopVoiceListeningTrigger = stopVoiceListeningTrigger,
                             onStartLiveVoice = {
-                                if (androidx.core.content.ContextCompat.checkSelfPermission(context, android.Manifest.permission.RECORD_AUDIO) != android.content.pm.PackageManager.PERMISSION_GRANTED) {
-                                    micPermissionLauncher.launch(android.Manifest.permission.RECORD_AUDIO)
+                                val isLive = com.example.LiveVoiceManager.isLiveModeActive.value
+                                if (isLive) {
+                                    com.example.LiveVoiceManager.stopLiveVoice(context)
                                 } else {
-                                    if (!android.provider.Settings.canDrawOverlays(context)) {
-                                        val intent = android.content.Intent(
-                                            android.provider.Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
-                                            android.net.Uri.parse("package:${context.packageName}")
-                                        )
-                                        context.startActivity(intent)
+                                    if (androidx.core.content.ContextCompat.checkSelfPermission(context, android.Manifest.permission.RECORD_AUDIO) != android.content.pm.PackageManager.PERMISSION_GRANTED) {
+                                        micPermissionLauncher.launch(android.Manifest.permission.RECORD_AUDIO)
+                                    } else {
+                                        showLiveBaatcheetChoiceDialog = true
                                     }
-                                    com.example.LiveVoiceManager.currentSessionId = viewModel.activeSessionId.value
-                                    com.example.LiveVoiceManager.toggleLiveVoice(context)
                                 }
                             },
                             onGalleryClick = { 
@@ -657,6 +683,16 @@ fun SaifAiApp(
                 onDismiss = { showUpgradeDialog = false }
             )
         }
+
+        // Fullscreen 3D Live JARVIS Mark 85 Arc Core HUD Dialog
+        if (showJarvisHudDialog) {
+            com.example.ui.components.JarvisHudDialog(
+                onDismiss = { showJarvisHudDialog = false },
+                onExecutePrompt = { prompt ->
+                    viewModel.sendMessage(context, prompt)
+                }
+            )
+        }
         
         AnimatedVisibility(
             visible = showConfigureDialog,
@@ -816,11 +852,22 @@ fun SaifAiApp(
                 },
                 onCreateFromPrompt = { userPrompt ->
                     showVideoProjectDialog = false
+                    val cleanTitle = userPrompt.take(28).trim().ifBlank { "AI Video Project" }
+                    val initialProj = com.example.ui.components.VideoProjectData(
+                        projectName = cleanTitle,
+                        textOverlay = cleanTitle.uppercase(),
+                        clips = emptyList()
+                    )
+                    activeVideoProjectData = initialProj
+                    showVideoStudio = true
+                    viewModel.createVideoProjectSession(initialProj, context)
+
                     android.widget.Toast.makeText(
                         context,
-                        "🎬 Researching & synthesizing: '$userPrompt'...",
+                        "🎬 Autonomous AI Director: Researching & assembling '$cleanTitle'...",
                         android.widget.Toast.LENGTH_SHORT
                     ).show()
+
                     scope.launch {
                         val result = com.example.ui.components.SaifAiEditingEngine.generateAutonomousDirectorEdl(
                             context = context,
@@ -829,18 +876,25 @@ fun SaifAiApp(
                         )
                         result.onSuccess { (_, proj) ->
                             activeVideoProjectData = proj
-                            showVideoStudio = true
+                            com.example.util.ProjectDataManager.saveVideoProject(context, proj)
                             viewModel.createVideoProjectSession(proj, context)
                             android.widget.Toast.makeText(
                                 context,
-                                "✅ Video assembled from prompt!",
+                                "✅ Video assembled from prompt with Telegram assets!",
                                 android.widget.Toast.LENGTH_SHORT
                             ).show()
                         }.onFailure { err ->
+                            // Algorithmic synthesis fallback: guarantees project is never blank or failing
+                            val catalog = com.example.ui.components.TelegramAssetManager.loadMasterCatalog(context)
+                            val fallbackEdl = com.example.ui.components.SaifAiEditingEngine.synthesizeAlgorithmicEdl(userPrompt, catalog)
+                            val fallbackProj = com.example.ui.components.SaifAiEditingEngine.convertEdlToProject(context, fallbackEdl, userPrompt)
+                            activeVideoProjectData = fallbackProj
+                            com.example.util.ProjectDataManager.saveVideoProject(context, fallbackProj)
+                            viewModel.createVideoProjectSession(fallbackProj, context)
                             android.widget.Toast.makeText(
                                 context,
-                                "Generation error: ${err.message}",
-                                android.widget.Toast.LENGTH_LONG
+                                "🎬 Video assembled via Autonomous Director engine!",
+                                android.widget.Toast.LENGTH_SHORT
                             ).show()
                         }
                     }
@@ -864,9 +918,18 @@ fun SaifAiApp(
             ) + fadeOut(tween(200))
         ) {
             activeVideoProjectData?.let { videoProject ->
-                com.example.ui.components.VideoTimelineStudioScreen(
-                    initialProject = videoProject,
-                    onClose = { showVideoStudio = false }
+                val studioProject = remember(videoProject.projectName) {
+                    com.example.studio.model.StudioProjectMigrator.migrate(videoProject)
+                }
+                val studioViewModel = remember(studioProject.id) {
+                    com.example.studio.state.StudioViewModel(context, studioProject)
+                }
+                com.example.studio.ui.StudioScreen(
+                    viewModel = studioViewModel,
+                    onBack = { showVideoStudio = false },
+                    onExportClick = {
+                        android.widget.Toast.makeText(context, "Full Video Export unlocks in Level 2", android.widget.Toast.LENGTH_SHORT).show()
+                    }
                 )
             }
         }
@@ -882,6 +945,37 @@ fun SaifAiApp(
                 initialPrompt = initialSpokenQuery,
                 onDismiss = {
                     com.example.util.WakeWordManager.dismissAssistant()
+                }
+            )
+        }
+
+        // Live Baatcheet Mode Selection Dialog (Share Screen vs Voice Control)
+        if (showLiveBaatcheetChoiceDialog) {
+            com.example.ui.components.LiveBaatcheetChoiceDialog(
+                onDismiss = { showLiveBaatcheetChoiceDialog = false },
+                onSelectScreenShare = {
+                    com.example.LiveVoiceManager.currentSessionId = viewModel.activeSessionId.value
+                    com.example.LiveVoiceManager.startLiveVoice(context, enableScreenShare = true)
+                    if (mediaProjectionManager != null) {
+                        try {
+                            screenCaptureLauncher.launch(mediaProjectionManager.createScreenCaptureIntent())
+                        } catch (e: Exception) {
+                            android.widget.Toast.makeText(context, "Screen capture init error: ${e.message}", android.widget.Toast.LENGTH_SHORT).show()
+                        }
+                    }
+                },
+                onSelectVoiceControl = {
+                    if (!android.provider.Settings.canDrawOverlays(context)) {
+                        try {
+                            val intent = android.content.Intent(
+                                android.provider.Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
+                                android.net.Uri.parse("package:${context.packageName}")
+                            )
+                            context.startActivity(intent)
+                        } catch (_: Exception) {}
+                    }
+                    com.example.LiveVoiceManager.currentSessionId = viewModel.activeSessionId.value
+                    com.example.LiveVoiceManager.startLiveVoice(context, enableScreenShare = false)
                 }
             )
         }

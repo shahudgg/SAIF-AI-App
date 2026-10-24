@@ -101,59 +101,7 @@ fun VideoProjectCreateDialog(
     val textSecondary = Color(0xFFCCC3D9)
     val textMuted = Color(0xFF958DA2)
 
-    val sampleProjects = remember {
-        listOf(
-            StudioProjectCard(
-                id = "proj_1",
-                title = "Cyberpunk Tokyo Vlog",
-                editedTimeAgo = "Edited 12m ago",
-                resolutionBadge = "1080p",
-                durationText = "00:42",
-                tagText = "AI Edit",
-                tagColor = Color(0xFF00DAF3),
-                tagIcon = Icons.Default.AutoFixHigh,
-                imageUrl = "https://lh3.googleusercontent.com/aida-public/AB6AXuAmIc0QYejJAbE797AHfpohc4u3omNqxFZFtOa9MX-4uWtC68tfW3432DR_tquTzC09awyDzxRJqpCfT7TTtvLQyVCx9-yjUqC1Nr9RExUlWs72fYfCvike6DfnVdGrY1yUtYHHShq7_F0hfRC1xhFxhaVS0kBBfPK_Lvbtf1S3oYxBjz58i5vSvuY3pUnurwWOLWkhuYMQdxu4oSCKlsZ35CiwFCVpngk8ytkADqb4SDKjjMZKb7go",
-                aspectRatioLabel = "9:16"
-            ),
-            StudioProjectCard(
-                id = "proj_2",
-                title = "Nike Commercial",
-                editedTimeAgo = "Edited 4h ago",
-                resolutionBadge = "4K",
-                durationText = "00:28",
-                tagText = "16:9",
-                tagColor = Color(0xFFAEC6FF),
-                tagIcon = Icons.Default.Crop169,
-                imageUrl = "https://lh3.googleusercontent.com/aida-public/AB6AXuCivVQgzzKHFM5xAo4d8uhQRsEhHkHESWrh14k7AASEg-lUS1bJkZIv8ylAUVt5gsdM1Cg5g_JFZBoCNmxaXH_V8GHwIvbqbjb7wLk0tmHCqi0mkLDmLK8ofAOt2CY9qnf5QU-_WeVmVIJZ9EGKFY8QWeAV5o4GydTljaGlNMVewWtKQbPVHdE0WdcfNi-ZQBOREWDmf0kBpNz7Fhk19Kdck10FhhuD1JKxRf711zfyLz9dvzl-Oqy8",
-                aspectRatioLabel = "16:9"
-            ),
-            StudioProjectCard(
-                id = "proj_3",
-                title = "AI SaaS Teaser Reel",
-                editedTimeAgo = "Yesterday",
-                resolutionBadge = "1080p",
-                durationText = "00:15",
-                tagText = "AI Edit",
-                tagColor = Color(0xFF00DAF3),
-                tagIcon = Icons.Default.AutoAwesome,
-                imageUrl = "https://lh3.googleusercontent.com/aida-public/AB6AXuB4keIIjDPFcNmCnnIULqiI2WTEG_t8tabzu4uUApVJMLHwpnu9_13J9Zl1t_pD1SfWyaxXbhtV1XNk3SNR52qFDwV1u7u0AhK4-t5c_bV-KNi7Xk29tSV2IyRFBT0hyCYb-D8-JE5RuEOFseX9lT2HHfhelas-ujuf6LHw2nYQWVi2XfBqt-sPrDs_kVTsQ6uXa8LBgTrRCejhoR6yC9DHg1Lp8Ah_pGYRERsfa8XTpsTqTstCEavo",
-                aspectRatioLabel = "9:16"
-            ),
-            StudioProjectCard(
-                id = "proj_4",
-                title = "Lo-Fi Soundscape",
-                editedTimeAgo = "3d ago",
-                resolutionBadge = "Audio",
-                durationText = "01:20",
-                tagText = "1:1",
-                tagColor = Color(0xFFCCC3D9),
-                tagIcon = Icons.Default.GraphicEq,
-                imageUrl = "https://lh3.googleusercontent.com/aida-public/AB6AXuByG6Ptj1rpLOmbINFwBIXH844yPVrFLAx5b7UmL_7J0DdMRj0X0uztogFX8vRCWJJLgKDj0SzYnlxTqq6Yy_GD0E0TkDxwmLgY0nYh5slmiTZ54PYdCRISdSj9oXezRgboUB9OvG5M7-qPt53tB9nKI68Lg9Hl0IK9_8BHjBlDWlBCKvraerRaK035-oDCOhjFDC4zeonOaRb7RpRl0Bl7oIEQ6VZ4Jk0ro591Z9V5d8t0PD0BNZ4K",
-                aspectRatioLabel = "1:1",
-                isAudio = true
-            )
-        )
-    }
+    val sampleProjects = remember { emptyList<StudioProjectCard>() }
 
     val dynamicSavedCards = remember(savedProjectsList) {
         savedProjectsList.map { draft ->
@@ -166,15 +114,13 @@ fun VideoProjectCreateDialog(
                 tagText = if (draft.clips.any { it.isAiEnhanced }) "AI Edit" else "${draft.clips.size} Clips",
                 tagColor = if (draft.clips.any { it.isAiEnhanced }) Color(0xFF00DAF3) else Color(0xFFA855F7),
                 tagIcon = if (draft.clips.any { it.isAiEnhanced }) Icons.Default.AutoFixHigh else Icons.Default.Videocam,
-                imageUrl = draft.clips.firstOrNull { it.uri != null }?.uri?.toString() ?: "https://lh3.googleusercontent.com/aida-public/AB6AXuAmIc0QYejJAbE797AHfpohc4u3omNqxFZFtOa9MX-4uWtC68tfW3432DR_tquTzC09awyDzxRJqpCfT7TTtvLQyVCx9-yjUqC1Nr9RExUlWs72fYfCvike6DfnVdGrY1yUtYHHShq7_F0hfRC1xhFxhaVS0kBBfPK_Lvbtf1S3oYxBjz58i5vSvuY3pUnurwWOLWkhuYMQdxu4oSCKlsZ35CiwFCVpngk8ytkADqb4SDKjjMZKb7go",
+                imageUrl = draft.clips.firstOrNull { it.uri != null }?.uri?.toString() ?: "",
                 aspectRatioLabel = "16:9"
             )
         }
     }
 
-    val combinedProjects = remember(dynamicSavedCards, sampleProjects) {
-        dynamicSavedCards + sampleProjects.filter { s -> dynamicSavedCards.none { it.title.equals(s.title, ignoreCase = true) } }
-    }
+    val combinedProjects = dynamicSavedCards
 
     val filteredProjects = remember(selectedFilter, combinedProjects) {
         when (selectedFilter) {
@@ -1103,7 +1049,7 @@ fun VideoProjectCreateDialog(
                             Surface(
                                 onClick = {
                                     showWorkflowChoiceModal = false
-                                    val name = projectNameInput.ifBlank { "Cyberpunk Tokyo Vlog" }
+                                    val name = projectNameInput.ifBlank { "Untitled ${savedProjectsList.size + 1}" }
                                     onSelectWithMedia(name)
                                 },
                                 shape = RoundedCornerShape(16.dp),
@@ -1184,7 +1130,7 @@ fun VideoProjectCreateDialog(
                             Surface(
                                 onClick = {
                                     showWorkflowChoiceModal = false
-                                    val name = projectNameInput.ifBlank { "Blank Timeline Project" }
+                                    val name = projectNameInput.ifBlank { "Untitled ${savedProjectsList.size + 1}" }
                                     onSelectWithoutMedia(name)
                                 },
                                 shape = RoundedCornerShape(16.dp),

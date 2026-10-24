@@ -41,8 +41,15 @@ class LiveVoiceService : Service(), LifecycleOwner, ViewModelStoreOwner, SavedSt
     
     private lateinit var engine: LiveVoiceSessionManager
 
+    companion object {
+        @Volatile
+        var activeInstance: LiveVoiceService? = null
+        const val EXTRA_SCREEN_SHARE = "extra_screen_share"
+    }
+
     override fun onCreate() {
         super.onCreate()
+        activeInstance = this
         savedStateRegistryController.performRestore(null)
         lifecycleRegistry.handleLifecycleEvent(Lifecycle.Event.ON_CREATE)
         
@@ -54,16 +61,27 @@ class LiveVoiceService : Service(), LifecycleOwner, ViewModelStoreOwner, SavedSt
         LiveVoiceManager.engine = engine
         
         createNotificationChannel()
+        val isScreenShareRequested = LiveVoiceManager.shouldStartWithScreenShare || LiveVoiceManager.isScreenSharingActive.value
         val notification = NotificationCompat.Builder(this, "VOICE_CHANNEL")
-            .setContentTitle("Live Voice Session")
-            .setContentText("Tap to return to app")
-            .setSmallIcon(android.R.drawable.ic_btn_speak_now) // placeholder
+            .setContentTitle(if (isScreenShareRequested) "Live Baatcheet & Screen Share Active" else "Live Baatcheet Session")
+            .setContentText(if (isScreenShareRequested) "SAIF AI is watching your screen and listening..." else "Tap to return to SAIF AI")
+            .setSmallIcon(android.R.drawable.ic_btn_speak_now)
             .build()
             
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            startForeground(1, notification, android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE)
-        } else {
-            startForeground(1, notification)
+        try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                val types = if (isScreenShareRequested) {
+                    android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE or
+                    android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION
+                } else {
+                    android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE
+                }
+                startForeground(1, notification, types)
+            } else {
+                startForeground(1, notification)
+            }
+        } catch (e: Exception) {
+            android.util.Log.e("LiveVoiceService", "Error in startForeground onCreate: ${e.message}", e)
         }
         
         showOverlay()
@@ -165,8 +183,59 @@ class LiveVoiceService : Service(), LifecycleOwner, ViewModelStoreOwner, SavedSt
         }
     }
 
+    override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        val enableScreenShare = intent?.getBooleanExtra(EXTRA_SCREEN_SHARE, false) == true || LiveVoiceManager.shouldStartWithScreenShare
+        if (enableScreenShare) {
+            elevateToMediaProjection()
+        }
+        return START_STICKY
+    }
+
+    fun elevateToMediaProjection() {
+        try {
+            val notification = NotificationCompat.Builder(this, "VOICE_CHANNEL")
+                .setContentTitle("Live Baatcheet & Screen Share Active")
+                .setContentText("SAIF AI is watching your screen and listening...")
+                .setSmallIcon(android.R.drawable.ic_btn_speak_now)
+                .build()
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                startForeground(
+                    1,
+                    notification,
+                    android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE or
+                    android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION
+                )
+            } else {
+                startForeground(1, notification)
+            }
+            android.util.Log.i("LiveVoiceService", "Elevated to MEDIA_PROJECTION foreground service successfully")
+        } catch (e: Exception) {
+            android.util.Log.e("LiveVoiceService", "Could not elevate to mediaProjection: ${e.message}", e)
+        }
+    }
+
+    fun demoteFromMediaProjection() {
+        try {
+            val notification = NotificationCompat.Builder(this, "VOICE_CHANNEL")
+                .setContentTitle("Live Voice Session Active")
+                .setContentText("Tap to return to SAIF AI")
+                .setSmallIcon(android.R.drawable.ic_btn_speak_now)
+                .build()
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                startForeground(1, notification, android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE)
+            } else {
+                startForeground(1, notification)
+            }
+            android.util.Log.i("LiveVoiceService", "Demoted to MICROPHONE foreground service")
+        } catch (e: Exception) {
+            android.util.Log.e("LiveVoiceService", "Could not demote from mediaProjection: ${e.message}", e)
+        }
+    }
+
     override fun onDestroy() {
         super.onDestroy()
+        activeInstance = null
+        com.example.vision.ScreenCaptureManager.getInstance().stopCapture()
         engine.stop()
         LiveVoiceManager.engine = null
         LiveVoiceManager.isLiveModeActive.value = false

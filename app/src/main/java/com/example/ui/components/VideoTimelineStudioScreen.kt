@@ -1,5 +1,6 @@
 package com.example.ui.components
 
+import android.media.MediaMetadataRetriever
 import android.net.Uri
 import android.widget.Toast
 import androidx.activity.compose.BackHandler
@@ -9,10 +10,14 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.*
 import androidx.compose.animation.core.*
 import androidx.compose.foundation.*
+import androidx.compose.foundation.gestures.detectDragGestures
+import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.gestures.detectTransformGestures
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.Redo
@@ -24,6 +29,7 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
@@ -41,7 +47,8 @@ import java.util.UUID
 enum class VideoStudioSubView {
     NONE,
     AI_DIRECTOR_CHAT,
-    EXPORT_STUDIO
+    EXPORT_STUDIO,
+    AI_VIDEO_GENERATOR
 }
 
 /**
@@ -56,6 +63,7 @@ enum class VideoStudioSubView {
  *    - Edit, Audio, Text, Overlay, Effects (25+), Filters (10), Adjust, Ratio, Pro Tools (22)
  * 7. Navigation into AI Chat Director and Export Studio
  */
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun VideoTimelineStudioScreen(
     initialProject: VideoProjectData,
@@ -67,6 +75,7 @@ fun VideoTimelineStudioScreen(
     var activeToolTab by remember { mutableStateOf(VideoStudioToolTab.NONE) }
     var isPlaying by remember { mutableStateOf(false) }
     var showSaifAiEditingModal by remember { mutableStateOf(false) }
+    var showAiToolsModal by remember { mutableStateOf(false) }
 
     // Undo & Redo History Stacks
     var undoStack by remember { mutableStateOf(listOf<VideoProjectData>()) }
@@ -79,6 +88,44 @@ fun VideoTimelineStudioScreen(
         val remainingSecs = totalSecs % 60
         val millis = ((sec - totalSecs) * 100).toInt()
         return "%02d:%02d:%02d".format(minutes, remainingSecs, millis)
+    }
+
+    fun formatExactTimestamp(sec: Float): String {
+        val totalSecs = sec.toInt()
+        val minutes = totalSecs / 60
+        val remainingSecs = totalSecs % 60
+        val tenths = ((sec - totalSecs) * 10).toInt().coerceIn(0, 9)
+        return "%02d:%02d.%01d".format(minutes, remainingSecs, tenths)
+    }
+
+    var isSnapEnabled by remember { mutableStateOf(true) }
+    var timelineZoom by remember { mutableStateOf(1.0f) }
+    var selectedTrackNum by remember { mutableStateOf(1) }
+    var selectedCardId by remember { mutableStateOf("") }
+
+    fun calculateSnappedPosition(pos: Float, snapThreshold: Float = 0.25f): Float {
+        if (!isSnapEnabled) return pos
+        val points = mutableListOf(0f, currentProject.totalDurationSeconds)
+        var accum = 0f
+        currentProject.clips.forEach { clip ->
+            points.add(accum)
+            accum += clip.durationSeconds
+            points.add(accum)
+        }
+        currentProject.getResolvedCodeTracks().forEach {
+            points.add(it.startSeconds)
+            points.add(it.startSeconds + it.durationSeconds)
+        }
+        currentProject.getResolvedVisualAssets().forEach {
+            points.add(it.startSeconds)
+            points.add(it.startSeconds + it.durationSeconds)
+        }
+        for (pt in points) {
+            if (kotlin.math.abs(pos - pt) <= snapThreshold) {
+                return pt
+            }
+        }
+        return pos
     }
 
     fun pushState(newProject: VideoProjectData) {
@@ -112,178 +159,535 @@ fun VideoTimelineStudioScreen(
     }
 
     fun applySmartSplit() {
-        if (currentProject.clips.isEmpty()) {
-            Toast.makeText(context, "No clips to split", Toast.LENGTH_SHORT).show()
-            return
-        }
-
-        // Find which clip contains the current playhead
-        var foundIdx = -1
-        var accum = 0f
-        var offsetAtPlayhead = 0f
-        for (i in currentProject.clips.indices) {
-            val clip = currentProject.clips[i]
-            val clipStart = accum
-            val clipEnd = accum + clip.durationSeconds
-            if (currentProject.currentPositionSeconds >= clipStart && currentProject.currentPositionSeconds <= clipEnd + 0.05f) {
-                foundIdx = i
-                offsetAtPlayhead = (currentProject.currentPositionSeconds - clipStart).coerceIn(0f, clip.durationSeconds)
-                break
+        val playhead = currentProject.currentPositionSeconds
+        when (selectedTrackNum) {
+            1 -> {
+                val list = currentProject.getResolvedCodeTracks().toMutableList()
+                val idx = list.indexOfFirst { playhead in (it.startSeconds + 0.15f)..(it.startSeconds + it.durationSeconds - 0.15f) }
+                if (idx != -1) {
+                    val item = list[idx]
+                    val dur1 = playhead - item.startSeconds
+                    val dur2 = item.durationSeconds - dur1
+                    val item1 = item.copy(id = UUID.randomUUID().toString(), durationSeconds = dur1)
+                    val item2 = item.copy(id = UUID.randomUUID().toString(), title = "${item.title} (Part 2)", startSeconds = playhead, durationSeconds = dur2)
+                    list[idx] = item1
+                    list.add(idx + 1, item2)
+                    pushState(currentProject.copy(codeTracks = list))
+                    Toast.makeText(context, "✂️ Track 1 Code card split at ${formatSeconds(playhead)}!", Toast.LENGTH_SHORT).show()
+                } else {
+                    Toast.makeText(context, "Position playhead inside a Code card to split", Toast.LENGTH_SHORT).show()
+                }
             }
-            accum = clipEnd
+            3 -> {
+                val list = currentProject.getResolvedVisualAssets().toMutableList()
+                val idx = list.indexOfFirst { playhead in (it.startSeconds + 0.15f)..(it.startSeconds + it.durationSeconds - 0.15f) }
+                if (idx != -1) {
+                    val item = list[idx]
+                    val dur1 = playhead - item.startSeconds
+                    val dur2 = item.durationSeconds - dur1
+                    val item1 = item.copy(id = UUID.randomUUID().toString(), durationSeconds = dur1)
+                    val item2 = item.copy(id = UUID.randomUUID().toString(), name = "${item.name} (Part 2)", startSeconds = playhead, durationSeconds = dur2)
+                    list[idx] = item1
+                    list.add(idx + 1, item2)
+                    pushState(currentProject.copy(visualAssetTracks = list))
+                    Toast.makeText(context, "✂️ Track 3 Asset card split!", Toast.LENGTH_SHORT).show()
+                } else {
+                    Toast.makeText(context, "Position playhead inside an Asset card", Toast.LENGTH_SHORT).show()
+                }
+            }
+            4 -> {
+                val list = currentProject.getResolvedTextSubtitles().toMutableList()
+                val idx = list.indexOfFirst { playhead in (it.startSeconds + 0.15f)..(it.startSeconds + it.durationSeconds - 0.15f) }
+                if (idx != -1) {
+                    val item = list[idx]
+                    val dur1 = playhead - item.startSeconds
+                    val dur2 = item.durationSeconds - dur1
+                    val item1 = item.copy(id = UUID.randomUUID().toString(), durationSeconds = dur1)
+                    val item2 = item.copy(id = UUID.randomUUID().toString(), startSeconds = playhead, durationSeconds = dur2)
+                    list[idx] = item1
+                    list.add(idx + 1, item2)
+                    pushState(currentProject.copy(textSubtitleTracks = list))
+                    Toast.makeText(context, "✂️ Track 4 Subtitle card split!", Toast.LENGTH_SHORT).show()
+                } else {
+                    Toast.makeText(context, "Position playhead inside a Subtitle card", Toast.LENGTH_SHORT).show()
+                }
+            }
+            5 -> {
+                val list = currentProject.getResolvedVoiceoverTracks().toMutableList()
+                val idx = list.indexOfFirst { playhead in (it.startSeconds + 0.15f)..(it.startSeconds + it.durationSeconds - 0.15f) }
+                if (idx != -1) {
+                    val item = list[idx]
+                    val dur1 = playhead - item.startSeconds
+                    val dur2 = item.durationSeconds - dur1
+                    val item1 = item.copy(id = UUID.randomUUID().toString(), durationSeconds = dur1)
+                    val item2 = item.copy(id = UUID.randomUUID().toString(), startSeconds = playhead, durationSeconds = dur2)
+                    list[idx] = item1
+                    list.add(idx + 1, item2)
+                    pushState(currentProject.copy(voiceoverTracks = list))
+                    Toast.makeText(context, "✂️ Track 5 Voiceover split!", Toast.LENGTH_SHORT).show()
+                } else {
+                    Toast.makeText(context, "Position playhead inside a Voiceover card", Toast.LENGTH_SHORT).show()
+                }
+            }
+            6 -> {
+                val list = currentProject.getResolvedSoundAudioTracks().toMutableList()
+                val idx = list.indexOfFirst { playhead in (it.startSeconds + 0.15f)..(it.startSeconds + it.durationSeconds - 0.15f) }
+                if (idx != -1) {
+                    val item = list[idx]
+                    val dur1 = playhead - item.startSeconds
+                    val dur2 = item.durationSeconds - dur1
+                    val item1 = item.copy(id = UUID.randomUUID().toString(), durationSeconds = dur1)
+                    val item2 = item.copy(id = UUID.randomUUID().toString(), title = "${item.title} (Part 2)", startSeconds = playhead, durationSeconds = dur2)
+                    list[idx] = item1
+                    list.add(idx + 1, item2)
+                    pushState(currentProject.copy(soundAudioTracks = list))
+                    Toast.makeText(context, "✂️ Track 6 Sound card split!", Toast.LENGTH_SHORT).show()
+                } else {
+                    Toast.makeText(context, "Position playhead inside a Sound card", Toast.LENGTH_SHORT).show()
+                }
+            }
+            else -> {
+                // TRACK 2: VIDEO CLIPS
+                if (currentProject.clips.isEmpty()) {
+                    Toast.makeText(context, "No clips to split", Toast.LENGTH_SHORT).show()
+                    return
+                }
+
+                var foundIdx = -1
+                var accum = 0f
+                var offsetAtPlayhead = 0f
+                for (i in currentProject.clips.indices) {
+                    val clip = currentProject.clips[i]
+                    val clipStart = accum
+                    val clipEnd = accum + clip.durationSeconds
+                    if (playhead >= clipStart && playhead <= clipEnd + 0.05f) {
+                        foundIdx = i
+                        offsetAtPlayhead = (playhead - clipStart).coerceIn(0f, clip.durationSeconds)
+                        break
+                    }
+                    accum = clipEnd
+                }
+
+                val selectedIdx = currentProject.selectedClipIndex.coerceIn(0, currentProject.clips.size - 1)
+                val targetIdx = if (foundIdx != -1) foundIdx else selectedIdx
+                val target = currentProject.clips[targetIdx]
+
+                if (target.durationSeconds < 0.3f) {
+                    Toast.makeText(context, "Clip too short to split (<0.3s)", Toast.LENGTH_SHORT).show()
+                    return
+                }
+
+                val splitOffset = if (foundIdx == targetIdx && offsetAtPlayhead in 0.15f..(target.durationSeconds - 0.15f)) {
+                    offsetAtPlayhead
+                } else {
+                    target.durationSeconds / 2f
+                }
+
+                val durA = splitOffset
+                val durB = target.durationSeconds - splitOffset
+                val baseName = target.name.replace(Regex("_part\\d+|_cut\\d+"), "")
+
+                val partA = target.copy(
+                    id = UUID.randomUUID().toString(),
+                    name = "${baseName}_part1",
+                    durationSeconds = durA,
+                    inSeconds = target.inSeconds,
+                    outSeconds = target.inSeconds + durA,
+                    origin = "manual",
+                    lastModified = System.currentTimeMillis()
+                )
+                val partB = target.copy(
+                    id = UUID.randomUUID().toString(),
+                    name = "${baseName}_part2",
+                    durationSeconds = durB,
+                    inSeconds = target.inSeconds + durA,
+                    outSeconds = target.outSeconds,
+                    origin = "manual",
+                    lastModified = System.currentTimeMillis()
+                )
+
+                val newClips = currentProject.clips.toMutableList()
+                newClips.removeAt(targetIdx)
+                newClips.add(targetIdx, partA)
+                newClips.add(targetIdx + 1, partB)
+
+                val newTotal = newClips.sumOf { it.durationSeconds.toDouble() }.toFloat()
+
+                pushState(
+                    currentProject.copy(
+                        clips = newClips,
+                        selectedClipIndex = targetIdx + 1,
+                        totalDurationSeconds = newTotal
+                    )
+                )
+                Toast.makeText(context, "✂️ Split into 2 parts at ${formatSeconds(playhead)}!", Toast.LENGTH_SHORT).show()
+            }
         }
-
-        val selectedIdx = currentProject.selectedClipIndex.coerceIn(0, currentProject.clips.size - 1)
-        val targetIdx = if (foundIdx != -1) foundIdx else selectedIdx
-        val target = currentProject.clips[targetIdx]
-
-        if (target.durationSeconds < 0.3f) {
-            Toast.makeText(context, "Clip too short to split (<0.3s)", Toast.LENGTH_SHORT).show()
-            return
-        }
-
-        val splitOffset = if (foundIdx == targetIdx && offsetAtPlayhead in 0.15f..(target.durationSeconds - 0.15f)) {
-            offsetAtPlayhead
-        } else {
-            target.durationSeconds / 2f
-        }
-
-        val durA = splitOffset
-        val durB = target.durationSeconds - splitOffset
-        val baseName = target.name.replace(Regex("_part\\d+|_cut\\d+"), "")
-
-        val partA = target.copy(
-            id = UUID.randomUUID().toString(),
-            name = "${baseName}_part1",
-            durationSeconds = durA,
-            inSeconds = target.inSeconds,
-            outSeconds = target.inSeconds + durA,
-            origin = "manual",
-            lastModified = System.currentTimeMillis()
-        )
-        val partB = target.copy(
-            id = UUID.randomUUID().toString(),
-            name = "${baseName}_part2",
-            durationSeconds = durB,
-            inSeconds = target.inSeconds + durA,
-            outSeconds = target.outSeconds,
-            origin = "manual",
-            lastModified = System.currentTimeMillis()
-        )
-
-        val newClips = currentProject.clips.toMutableList()
-        newClips.removeAt(targetIdx)
-        newClips.add(targetIdx, partA)
-        newClips.add(targetIdx + 1, partB)
-
-        val newTotal = newClips.sumOf { it.durationSeconds.toDouble() }.toFloat()
-
-        pushState(
-            currentProject.copy(
-                clips = newClips,
-                selectedClipIndex = targetIdx + 1,
-                totalDurationSeconds = newTotal
-            )
-        )
-        Toast.makeText(context, "✂️ Split into 2 parts at ${formatSeconds(currentProject.currentPositionSeconds)}!", Toast.LENGTH_SHORT).show()
     }
 
     fun applyCutDelete() {
-        if (currentProject.clips.isEmpty()) {
-            Toast.makeText(context, "No clips to cut", Toast.LENGTH_SHORT).show()
-            return
+        when (selectedTrackNum) {
+            1 -> {
+                val list = currentProject.getResolvedCodeTracks().toMutableList()
+                if (list.size <= 1) {
+                    Toast.makeText(context, "Cannot delete only remaining code block", Toast.LENGTH_SHORT).show()
+                    return
+                }
+                val idx = list.indexOfFirst { it.id == selectedCardId }.coerceAtLeast(0)
+                list.removeAt(idx)
+                pushState(currentProject.copy(codeTracks = list))
+                Toast.makeText(context, "🗑️ Deleted Code Card", Toast.LENGTH_SHORT).show()
+            }
+            3 -> {
+                val list = currentProject.getResolvedVisualAssets().toMutableList()
+                if (list.isNotEmpty()) {
+                    val idx = list.indexOfFirst { it.id == selectedCardId }.coerceAtLeast(0)
+                    list.removeAt(idx)
+                    pushState(currentProject.copy(visualAssetTracks = list))
+                    Toast.makeText(context, "🗑️ Deleted Asset Card", Toast.LENGTH_SHORT).show()
+                }
+            }
+            4 -> {
+                val list = currentProject.getResolvedTextSubtitles().toMutableList()
+                if (list.isNotEmpty()) {
+                    val idx = list.indexOfFirst { it.id == selectedCardId }.coerceAtLeast(0)
+                    list.removeAt(idx)
+                    pushState(currentProject.copy(textSubtitleTracks = list))
+                    Toast.makeText(context, "🗑️ Deleted Subtitle Card", Toast.LENGTH_SHORT).show()
+                }
+            }
+            5 -> {
+                val list = currentProject.getResolvedVoiceoverTracks().toMutableList()
+                if (list.isNotEmpty()) {
+                    val idx = list.indexOfFirst { it.id == selectedCardId }.coerceAtLeast(0)
+                    list.removeAt(idx)
+                    pushState(currentProject.copy(voiceoverTracks = list))
+                    Toast.makeText(context, "🗑️ Deleted Voiceover Card", Toast.LENGTH_SHORT).show()
+                }
+            }
+            6 -> {
+                val list = currentProject.getResolvedSoundAudioTracks().toMutableList()
+                if (list.isNotEmpty()) {
+                    val idx = list.indexOfFirst { it.id == selectedCardId }.coerceAtLeast(0)
+                    list.removeAt(idx)
+                    pushState(currentProject.copy(soundAudioTracks = list))
+                    Toast.makeText(context, "🗑️ Deleted Sound Card", Toast.LENGTH_SHORT).show()
+                }
+            }
+            else -> {
+                // TRACK 2: VIDEO CLIPS
+                if (currentProject.clips.isEmpty()) {
+                    Toast.makeText(context, "No clips to cut", Toast.LENGTH_SHORT).show()
+                    return
+                }
+                if (currentProject.clips.size <= 1) {
+                    Toast.makeText(context, "Cannot delete only remaining clip", Toast.LENGTH_SHORT).show()
+                    return
+                }
+                val targetIdx = currentProject.selectedClipIndex.coerceIn(0, currentProject.clips.size - 1)
+                val target = currentProject.clips[targetIdx]
+                val newClips = currentProject.clips.toMutableList()
+                newClips.removeAt(targetIdx)
+                val newTotal = newClips.sumOf { it.durationSeconds.toDouble() }.toFloat()
+                val newSelected = (targetIdx - 1).coerceAtLeast(0)
+                pushState(
+                    currentProject.copy(
+                        clips = newClips,
+                        selectedClipIndex = newSelected,
+                        totalDurationSeconds = newTotal
+                    )
+                )
+                Toast.makeText(context, "🗑️ Cut / Removed '${target.name}'!", Toast.LENGTH_SHORT).show()
+            }
         }
-        if (currentProject.clips.size <= 1) {
-            Toast.makeText(context, "Cannot delete only remaining clip", Toast.LENGTH_SHORT).show()
-            return
-        }
-        val targetIdx = currentProject.selectedClipIndex.coerceIn(0, currentProject.clips.size - 1)
-        val target = currentProject.clips[targetIdx]
-        val newClips = currentProject.clips.toMutableList()
-        newClips.removeAt(targetIdx)
-        val newTotal = newClips.sumOf { it.durationSeconds.toDouble() }.toFloat()
-        val newSelected = (targetIdx - 1).coerceAtLeast(0)
-        pushState(
-            currentProject.copy(
-                clips = newClips,
-                selectedClipIndex = newSelected,
-                totalDurationSeconds = newTotal
-            )
-        )
-        Toast.makeText(context, "🗑️ Cut / Removed '${target.name}'!", Toast.LENGTH_SHORT).show()
-    }
-
-    fun applyCutHead() {
-        if (currentProject.clips.isEmpty()) return
-        val targetIdx = currentProject.selectedClipIndex.coerceIn(0, currentProject.clips.size - 1)
-        val target = currentProject.clips[targetIdx]
-
-        var accum = 0f
-        for (i in 0 until targetIdx) accum += currentProject.clips[i].durationSeconds
-        val offset = (currentProject.currentPositionSeconds - accum).coerceIn(0f, target.durationSeconds)
-
-        val trimAmount = if (offset in 0.2f..(target.durationSeconds - 0.2f)) offset else 0.5f.coerceAtMost(target.durationSeconds - 0.3f)
-        if (target.durationSeconds - trimAmount < 0.2f) {
-            Toast.makeText(context, "Cannot trim: piece would be too small", Toast.LENGTH_SHORT).show()
-            return
-        }
-
-        val trimmed = target.copy(
-            durationSeconds = target.durationSeconds - trimAmount,
-            inSeconds = target.inSeconds + trimAmount,
-            origin = "manual",
-            lastModified = System.currentTimeMillis()
-        )
-        val newClips = currentProject.clips.toMutableList()
-        newClips[targetIdx] = trimmed
-        val newTotal = newClips.sumOf { it.durationSeconds.toDouble() }.toFloat()
-        pushState(currentProject.copy(clips = newClips, totalDurationSeconds = newTotal))
-        Toast.makeText(context, "✂️◀ Trimmed start by ${"%.1f".format(trimAmount)}s", Toast.LENGTH_SHORT).show()
-    }
-
-    fun applyCutTail() {
-        if (currentProject.clips.isEmpty()) return
-        val targetIdx = currentProject.selectedClipIndex.coerceIn(0, currentProject.clips.size - 1)
-        val target = currentProject.clips[targetIdx]
-
-        var accum = 0f
-        for (i in 0 until targetIdx) accum += currentProject.clips[i].durationSeconds
-        val offset = (currentProject.currentPositionSeconds - accum).coerceIn(0f, target.durationSeconds)
-
-        val trimAmount = if (offset in 0.2f..(target.durationSeconds - 0.2f)) (target.durationSeconds - offset) else 0.5f.coerceAtMost(target.durationSeconds - 0.3f)
-        if (target.durationSeconds - trimAmount < 0.2f) {
-            Toast.makeText(context, "Cannot trim: piece would be too small", Toast.LENGTH_SHORT).show()
-            return
-        }
-
-        val trimmed = target.copy(
-            durationSeconds = target.durationSeconds - trimAmount,
-            outSeconds = target.outSeconds - trimAmount,
-            origin = "manual",
-            lastModified = System.currentTimeMillis()
-        )
-        val newClips = currentProject.clips.toMutableList()
-        newClips[targetIdx] = trimmed
-        val newTotal = newClips.sumOf { it.durationSeconds.toDouble() }.toFloat()
-        pushState(currentProject.copy(clips = newClips, totalDurationSeconds = newTotal))
-        Toast.makeText(context, "▶✂️ Trimmed end by ${"%.1f".format(trimAmount)}s", Toast.LENGTH_SHORT).show()
     }
 
     fun applyDuplicateClip() {
-        if (currentProject.clips.isEmpty()) return
-        val targetIdx = currentProject.selectedClipIndex.coerceIn(0, currentProject.clips.size - 1)
-        val target = currentProject.clips[targetIdx]
-        val dup = target.copy(
-            id = UUID.randomUUID().toString(),
-            name = "${target.name}_Copy",
-            origin = "manual",
-            lastModified = System.currentTimeMillis()
-        )
-        val newClips = currentProject.clips.toMutableList()
-        newClips.add(targetIdx + 1, dup)
-        val newTotal = newClips.sumOf { it.durationSeconds.toDouble() }.toFloat()
-        pushState(currentProject.copy(clips = newClips, selectedClipIndex = targetIdx + 1, totalDurationSeconds = newTotal))
-        Toast.makeText(context, "📋 Clip duplicated!", Toast.LENGTH_SHORT).show()
+        when (selectedTrackNum) {
+            1 -> {
+                val list = currentProject.getResolvedCodeTracks().toMutableList()
+                val idx = list.indexOfFirst { it.id == selectedCardId }.coerceAtLeast(0)
+                if (idx in list.indices) {
+                    val item = list[idx]
+                    val dup = item.copy(id = UUID.randomUUID().toString(), title = "${item.title} (Copy)", startSeconds = item.startSeconds + item.durationSeconds)
+                    list.add(idx + 1, dup)
+                    pushState(currentProject.copy(codeTracks = list))
+                    Toast.makeText(context, "📋 Code card duplicated!", Toast.LENGTH_SHORT).show()
+                }
+            }
+            3 -> {
+                val list = currentProject.getResolvedVisualAssets().toMutableList()
+                val idx = list.indexOfFirst { it.id == selectedCardId }.coerceAtLeast(0)
+                if (idx in list.indices) {
+                    val item = list[idx]
+                    val dup = item.copy(id = UUID.randomUUID().toString(), name = "${item.name} (Copy)", startSeconds = item.startSeconds + 1.0f)
+                    list.add(idx + 1, dup)
+                    pushState(currentProject.copy(visualAssetTracks = list))
+                    Toast.makeText(context, "📋 Asset card duplicated!", Toast.LENGTH_SHORT).show()
+                }
+            }
+            4 -> {
+                val list = currentProject.getResolvedTextSubtitles().toMutableList()
+                val idx = list.indexOfFirst { it.id == selectedCardId }.coerceAtLeast(0)
+                if (idx in list.indices) {
+                    val item = list[idx]
+                    val dup = item.copy(id = UUID.randomUUID().toString(), startSeconds = item.startSeconds + item.durationSeconds)
+                    list.add(idx + 1, dup)
+                    pushState(currentProject.copy(textSubtitleTracks = list))
+                    Toast.makeText(context, "📋 Subtitle duplicated!", Toast.LENGTH_SHORT).show()
+                }
+            }
+            5 -> {
+                val list = currentProject.getResolvedVoiceoverTracks().toMutableList()
+                val idx = list.indexOfFirst { it.id == selectedCardId }.coerceAtLeast(0)
+                if (idx in list.indices) {
+                    val item = list[idx]
+                    val dup = item.copy(id = UUID.randomUUID().toString(), startSeconds = item.startSeconds + item.durationSeconds)
+                    list.add(idx + 1, dup)
+                    pushState(currentProject.copy(voiceoverTracks = list))
+                    Toast.makeText(context, "📋 Voiceover duplicated!", Toast.LENGTH_SHORT).show()
+                }
+            }
+            6 -> {
+                val list = currentProject.getResolvedSoundAudioTracks().toMutableList()
+                val idx = list.indexOfFirst { it.id == selectedCardId }.coerceAtLeast(0)
+                if (idx in list.indices) {
+                    val item = list[idx]
+                    val dup = item.copy(id = UUID.randomUUID().toString(), title = "${item.title} (Copy)", startSeconds = item.startSeconds + item.durationSeconds)
+                    list.add(idx + 1, dup)
+                    pushState(currentProject.copy(soundAudioTracks = list))
+                    Toast.makeText(context, "📋 Sound duplicated!", Toast.LENGTH_SHORT).show()
+                }
+            }
+            else -> {
+                if (currentProject.clips.isEmpty()) return
+                val targetIdx = currentProject.selectedClipIndex.coerceIn(0, currentProject.clips.size - 1)
+                val target = currentProject.clips[targetIdx]
+                val dup = target.copy(
+                    id = UUID.randomUUID().toString(),
+                    name = "${target.name}_Copy",
+                    origin = "manual",
+                    lastModified = System.currentTimeMillis()
+                )
+                val newClips = currentProject.clips.toMutableList()
+                newClips.add(targetIdx + 1, dup)
+                val newTotal = newClips.sumOf { it.durationSeconds.toDouble() }.toFloat()
+                pushState(currentProject.copy(clips = newClips, selectedClipIndex = targetIdx + 1, totalDurationSeconds = newTotal))
+                Toast.makeText(context, "📋 Clip duplicated!", Toast.LENGTH_SHORT).show()
+            }
+        }
+    }
+
+    // Layer Order: Bring Forward or Send Backward
+    fun applyLayerOrder(bringForward: Boolean) {
+        if (selectedTrackNum == 2 && currentProject.clips.size > 1) {
+            val list = currentProject.clips.toMutableList()
+            val idx = currentProject.selectedClipIndex.coerceIn(0, list.lastIndex)
+            val swapWith = if (bringForward) idx + 1 else idx - 1
+            if (swapWith in list.indices) {
+                val temp = list[idx]
+                list[idx] = list[swapWith]
+                list[swapWith] = temp
+                pushState(currentProject.copy(clips = list, selectedClipIndex = swapWith))
+                Toast.makeText(context, if (bringForward) "Moved Forward ▲" else "Moved Backward ▼", Toast.LENGTH_SHORT).show()
+            }
+        } else if (selectedTrackNum == 3) {
+            val list = currentProject.getResolvedVisualAssets().toMutableList()
+            val idx = list.indexOfFirst { it.id == selectedCardId }
+            if (idx != -1) {
+                val swapWith = if (bringForward) idx + 1 else idx - 1
+                if (swapWith in list.indices) {
+                    val temp = list[idx]
+                    list[idx] = list[swapWith]
+                    list[swapWith] = temp
+                    pushState(currentProject.copy(visualAssetTracks = list))
+                    Toast.makeText(context, if (bringForward) "Layer Up ▲" else "Layer Down ▼", Toast.LENGTH_SHORT).show()
+                }
+            }
+        } else {
+            Toast.makeText(context, "Select a clip or visual asset to adjust layer order", Toast.LENGTH_SHORT).show()
+        }
+    }
+
+    // Cut Head: Ripple trim card start to playhead position
+    fun applyCutHead() {
+        val playhead = currentProject.currentPositionSeconds
+        when (selectedTrackNum) {
+            1 -> {
+                val list = currentProject.getResolvedCodeTracks().toMutableList()
+                val idx = list.indexOfFirst { it.id == selectedCardId || playhead in it.startSeconds..(it.startSeconds + it.durationSeconds) }
+                if (idx != -1) {
+                    val it = list[idx]
+                    val newDur = (it.startSeconds + it.durationSeconds) - playhead
+                    if (newDur >= 0.2f && playhead >= it.startSeconds) {
+                        list[idx] = it.copy(startSeconds = playhead, durationSeconds = newDur)
+                        pushState(currentProject.copy(codeTracks = list))
+                        Toast.makeText(context, "✂️ Trimmed Head to ${formatSeconds(playhead)}", Toast.LENGTH_SHORT).show()
+                    } else {
+                        Toast.makeText(context, "Playhead must be inside card to trim head", Toast.LENGTH_SHORT).show()
+                    }
+                }
+            }
+            3 -> {
+                val list = currentProject.getResolvedVisualAssets().toMutableList()
+                val idx = list.indexOfFirst { it.id == selectedCardId || playhead in it.startSeconds..(it.startSeconds + it.durationSeconds) }
+                if (idx != -1) {
+                    val it = list[idx]
+                    val newDur = (it.startSeconds + it.durationSeconds) - playhead
+                    if (newDur >= 0.2f && playhead >= it.startSeconds) {
+                        list[idx] = it.copy(startSeconds = playhead, durationSeconds = newDur)
+                        pushState(currentProject.copy(visualAssetTracks = list))
+                        Toast.makeText(context, "✂️ Trimmed Head to ${formatSeconds(playhead)}", Toast.LENGTH_SHORT).show()
+                    }
+                }
+            }
+            4 -> {
+                val list = currentProject.getResolvedTextSubtitles().toMutableList()
+                val idx = list.indexOfFirst { it.id == selectedCardId || playhead in it.startSeconds..(it.startSeconds + it.durationSeconds) }
+                if (idx != -1) {
+                    val it = list[idx]
+                    val newDur = (it.startSeconds + it.durationSeconds) - playhead
+                    if (newDur >= 0.2f && playhead >= it.startSeconds) {
+                        list[idx] = it.copy(startSeconds = playhead, durationSeconds = newDur)
+                        pushState(currentProject.copy(textSubtitleTracks = list))
+                        Toast.makeText(context, "✂️ Trimmed Head to ${formatSeconds(playhead)}", Toast.LENGTH_SHORT).show()
+                    }
+                }
+            }
+            5 -> {
+                val list = currentProject.getResolvedVoiceoverTracks().toMutableList()
+                val idx = list.indexOfFirst { it.id == selectedCardId || playhead in it.startSeconds..(it.startSeconds + it.durationSeconds) }
+                if (idx != -1) {
+                    val it = list[idx]
+                    val newDur = (it.startSeconds + it.durationSeconds) - playhead
+                    if (newDur >= 0.2f && playhead >= it.startSeconds) {
+                        list[idx] = it.copy(startSeconds = playhead, durationSeconds = newDur)
+                        pushState(currentProject.copy(voiceoverTracks = list))
+                        Toast.makeText(context, "✂️ Trimmed Head to ${formatSeconds(playhead)}", Toast.LENGTH_SHORT).show()
+                    }
+                }
+            }
+            6 -> {
+                val list = currentProject.getResolvedSoundAudioTracks().toMutableList()
+                val idx = list.indexOfFirst { it.id == selectedCardId || playhead in it.startSeconds..(it.startSeconds + it.durationSeconds) }
+                if (idx != -1) {
+                    val it = list[idx]
+                    val newDur = (it.startSeconds + it.durationSeconds) - playhead
+                    if (newDur >= 0.2f && playhead >= it.startSeconds) {
+                        list[idx] = it.copy(startSeconds = playhead, durationSeconds = newDur)
+                        pushState(currentProject.copy(soundAudioTracks = list))
+                        Toast.makeText(context, "✂️ Trimmed Head to ${formatSeconds(playhead)}", Toast.LENGTH_SHORT).show()
+                    }
+                }
+            }
+            else -> {
+                if (currentProject.clips.isNotEmpty()) {
+                    val targetIdx = currentProject.selectedClipIndex.coerceIn(0, currentProject.clips.lastIndex)
+                    val target = currentProject.clips[targetIdx]
+                    val cutAmount = 0.5f.coerceAtMost(target.durationSeconds - 0.2f)
+                    if (cutAmount > 0f) {
+                        val newDur = target.durationSeconds - cutAmount
+                        val newClips = currentProject.clips.toMutableList()
+                        newClips[targetIdx] = target.copy(
+                            durationSeconds = newDur,
+                            inSeconds = target.inSeconds + cutAmount
+                        )
+                        val newTotal = newClips.sumOf { it.durationSeconds.toDouble() }.toFloat()
+                        pushState(currentProject.copy(clips = newClips, totalDurationSeconds = newTotal))
+                        Toast.makeText(context, "✂️ Trimmed Head (0.5s)", Toast.LENGTH_SHORT).show()
+                    }
+                }
+            }
+        }
+    }
+
+    // Cut Tail: Ripple trim card end to playhead position
+    fun applyCutTail() {
+        val playhead = currentProject.currentPositionSeconds
+        when (selectedTrackNum) {
+            1 -> {
+                val list = currentProject.getResolvedCodeTracks().toMutableList()
+                val idx = list.indexOfFirst { it.id == selectedCardId || playhead in it.startSeconds..(it.startSeconds + it.durationSeconds) }
+                if (idx != -1) {
+                    val it = list[idx]
+                    val newDur = playhead - it.startSeconds
+                    if (newDur >= 0.2f) {
+                        list[idx] = it.copy(durationSeconds = newDur)
+                        pushState(currentProject.copy(codeTracks = list))
+                        Toast.makeText(context, "✂️ Trimmed Tail to ${formatSeconds(playhead)}", Toast.LENGTH_SHORT).show()
+                    } else {
+                        Toast.makeText(context, "Playhead must leave at least 0.2s duration", Toast.LENGTH_SHORT).show()
+                    }
+                }
+            }
+            3 -> {
+                val list = currentProject.getResolvedVisualAssets().toMutableList()
+                val idx = list.indexOfFirst { it.id == selectedCardId || playhead in it.startSeconds..(it.startSeconds + it.durationSeconds) }
+                if (idx != -1) {
+                    val it = list[idx]
+                    val newDur = playhead - it.startSeconds
+                    if (newDur >= 0.2f) {
+                        list[idx] = it.copy(durationSeconds = newDur)
+                        pushState(currentProject.copy(visualAssetTracks = list))
+                        Toast.makeText(context, "✂️ Trimmed Tail to ${formatSeconds(playhead)}", Toast.LENGTH_SHORT).show()
+                    }
+                }
+            }
+            4 -> {
+                val list = currentProject.getResolvedTextSubtitles().toMutableList()
+                val idx = list.indexOfFirst { it.id == selectedCardId || playhead in it.startSeconds..(it.startSeconds + it.durationSeconds) }
+                if (idx != -1) {
+                    val it = list[idx]
+                    val newDur = playhead - it.startSeconds
+                    if (newDur >= 0.2f) {
+                        list[idx] = it.copy(durationSeconds = newDur)
+                        pushState(currentProject.copy(textSubtitleTracks = list))
+                        Toast.makeText(context, "✂️ Trimmed Tail to ${formatSeconds(playhead)}", Toast.LENGTH_SHORT).show()
+                    }
+                }
+            }
+            5 -> {
+                val list = currentProject.getResolvedVoiceoverTracks().toMutableList()
+                val idx = list.indexOfFirst { it.id == selectedCardId || playhead in it.startSeconds..(it.startSeconds + it.durationSeconds) }
+                if (idx != -1) {
+                    val it = list[idx]
+                    val newDur = playhead - it.startSeconds
+                    if (newDur >= 0.2f) {
+                        list[idx] = it.copy(durationSeconds = newDur)
+                        pushState(currentProject.copy(voiceoverTracks = list))
+                        Toast.makeText(context, "✂️ Trimmed Tail to ${formatSeconds(playhead)}", Toast.LENGTH_SHORT).show()
+                    }
+                }
+            }
+            6 -> {
+                val list = currentProject.getResolvedSoundAudioTracks().toMutableList()
+                val idx = list.indexOfFirst { it.id == selectedCardId || playhead in it.startSeconds..(it.startSeconds + it.durationSeconds) }
+                if (idx != -1) {
+                    val it = list[idx]
+                    val newDur = playhead - it.startSeconds
+                    if (newDur >= 0.2f) {
+                        list[idx] = it.copy(durationSeconds = newDur)
+                        pushState(currentProject.copy(soundAudioTracks = list))
+                        Toast.makeText(context, "✂️ Trimmed Tail to ${formatSeconds(playhead)}", Toast.LENGTH_SHORT).show()
+                    }
+                }
+            }
+            else -> {
+                if (currentProject.clips.isNotEmpty()) {
+                    val targetIdx = currentProject.selectedClipIndex.coerceIn(0, currentProject.clips.lastIndex)
+                    val target = currentProject.clips[targetIdx]
+                    val cutAmount = 0.5f.coerceAtMost(target.durationSeconds - 0.2f)
+                    if (cutAmount > 0f) {
+                        val newDur = target.durationSeconds - cutAmount
+                        val newClips = currentProject.clips.toMutableList()
+                        newClips[targetIdx] = target.copy(durationSeconds = newDur)
+                        val newTotal = newClips.sumOf { it.durationSeconds.toDouble() }.toFloat()
+                        pushState(currentProject.copy(clips = newClips, totalDurationSeconds = newTotal))
+                        Toast.makeText(context, "✂️ Trimmed Tail (0.5s)", Toast.LENGTH_SHORT).show()
+                    }
+                }
+            }
+        }
     }
 
     // Modal dialogs
@@ -361,27 +765,84 @@ fun VideoTimelineStudioScreen(
         }
     }
 
-    // Launcher to add more clips from gallery (50+ items supported)
+    // Launcher to add more clips from gallery with real duration/metadata decoding
     val addMoreMediaLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.PickMultipleVisualMedia(100)
     ) { uris: List<Uri> ->
         if (uris.isNotEmpty()) {
             val newClips = uris.mapIndexed { idx, uri ->
+                var duration = 4.0f
+                var isPhoto = false
+                val mime = context.contentResolver.getType(uri) ?: ""
+                if (mime.startsWith("image/")) {
+                    isPhoto = true
+                    duration = 4.0f
+                } else {
+                    try {
+                        val retriever = MediaMetadataRetriever()
+                        retriever.setDataSource(context, uri)
+                        val durStr = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION)
+                        retriever.release()
+                        val durMs = durStr?.toLongOrNull() ?: 0L
+                        if (durMs > 200) {
+                            duration = (durMs / 1000f).coerceIn(1.0f, 600.0f)
+                            isPhoto = false
+                        } else {
+                            isPhoto = true
+                            duration = 4.0f
+                        }
+                    } catch (_: Exception) {
+                        isPhoto = mime.startsWith("image/")
+                        duration = 4.0f
+                    }
+                }
                 val name = uri.lastPathSegment?.substringAfterLast('/')?.take(18) ?: "Clip_${currentProject.clips.size + idx + 1}"
                 TimelineMediaClip(
                     name = name,
                     uri = uri,
-                    durationSeconds = 8.0f,
+                    durationSeconds = duration,
                     isAiEnhanced = false,
-                    isPhoto = false
+                    isPhoto = isPhoto
                 )
             }
+            val updatedClips = currentProject.clips + newClips
+            val newTotal = updatedClips.sumOf { it.durationSeconds.toDouble() }.toFloat()
             pushState(
                 currentProject.copy(
-                    clips = currentProject.clips + newClips
+                    clips = updatedClips,
+                    totalDurationSeconds = newTotal
                 )
             )
-            Toast.makeText(context, "Added ${uris.size} items to Timeline!", Toast.LENGTH_SHORT).show()
+            Toast.makeText(context, "✅ Imported ${uris.size} items with decoded duration!", Toast.LENGTH_SHORT).show()
+        }
+    }
+
+    // Launcher to import audio from phone storage into Track 6 (SFX / BGM)
+    val addAudioMediaLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.GetContent()
+    ) { uri: Uri? ->
+        if (uri != null) {
+            var dur = 15.0f
+            try {
+                val retriever = MediaMetadataRetriever()
+                retriever.setDataSource(context, uri)
+                val durStr = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION)
+                retriever.release()
+                val durMs = durStr?.toLongOrNull() ?: 0L
+                if (durMs > 200) dur = (durMs / 1000f).coerceIn(1.0f, 600.0f)
+            } catch (_: Exception) {}
+
+            val audioItem = SoundAudioTrackItem(
+                title = uri.lastPathSegment?.substringAfterLast('/')?.take(18) ?: "Custom_Track.mp3",
+                startSeconds = currentProject.currentPositionSeconds,
+                durationSeconds = dur,
+                isSfx = false,
+                volume = 1.0f,
+                audioUri = uri.toString()
+            )
+            val updatedAudio = currentProject.getResolvedSoundAudioTracks() + audioItem
+            pushState(currentProject.copy(soundAudioTracks = updatedAudio))
+            Toast.makeText(context, "✅ Audio imported to Track 6 (${"%.1f".format(dur)}s)!", Toast.LENGTH_SHORT).show()
         }
     }
 
@@ -539,31 +1000,124 @@ fun VideoTimelineStudioScreen(
                 onSelectMode = { viewportMode = it }
             )
 
-            Box(
+            // Pro NLE Aspect Ratio Switching Chips & Proxy Stream Mode Toggle Bar
+            Row(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .weight(1f)
-                    .padding(vertical = 4.dp),
+                    .padding(horizontal = 14.dp, vertical = 2.dp),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                // Aspect Ratio Selector Chips
+                Row(
+                    horizontalArrangement = Arrangement.spacedBy(4.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    val ratios = listOf(
+                        Pair("9:16", "📱 9:16 Shorts"),
+                        Pair("16:9", "📺 16:9 YT"),
+                        Pair("1:1", "⬛ 1:1 Square"),
+                        Pair("4:5", "📐 4:5 Feed")
+                    )
+                    ratios.forEach { (ratio, label) ->
+                        val isSelected = currentProject.aspectRatio == ratio
+                        Surface(
+                            onClick = {
+                                pushState(currentProject.copy(aspectRatio = ratio))
+                                Toast.makeText(context, "Aspect Ratio: $ratio", Toast.LENGTH_SHORT).show()
+                            },
+                            shape = RoundedCornerShape(10.dp),
+                            color = if (isSelected) Color(0xFF00DAF3).copy(alpha = 0.25f) else Color(0xFF1E1D24),
+                            border = BorderStroke(1.dp, if (isSelected) Color(0xFF00DAF3) else Color(0x30FFFFFF))
+                        ) {
+                            Text(
+                                text = label,
+                                color = if (isSelected) Color(0xFF00DAF3) else Color(0xFFCCC3D9),
+                                fontSize = 8.5.sp,
+                                fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Medium,
+                                fontFamily = FontFamily.Monospace,
+                                modifier = Modifier.padding(horizontal = 6.dp, vertical = 3.dp)
+                            )
+                        }
+                    }
+                }
+
+                // Proxy / Video Stream Preview Mode Toggle
+                Surface(
+                    onClick = {
+                        val nextState = !currentProject.isProxyModeEnabled
+                        pushState(currentProject.copy(isProxyModeEnabled = nextState))
+                        if (nextState) {
+                            Toast.makeText(context, "⚡ Proxy Stream Mode ON: Offscreen 60fps canvas stream (zero lag)", Toast.LENGTH_SHORT).show()
+                        } else {
+                            Toast.makeText(context, "💎 HD Direct Live Mode", Toast.LENGTH_SHORT).show()
+                        }
+                    },
+                    shape = RoundedCornerShape(10.dp),
+                    color = if (currentProject.isProxyModeEnabled) Color(0xFF35E6A0).copy(alpha = 0.2f) else Color(0xFF1E1D24),
+                    border = BorderStroke(1.dp, if (currentProject.isProxyModeEnabled) Color(0xFF35E6A0) else Color(0x30FFFFFF))
+                ) {
+                    Row(
+                        modifier = Modifier.padding(horizontal = 6.dp, vertical = 3.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Box(
+                            modifier = Modifier
+                                .size(5.dp)
+                                .clip(CircleShape)
+                                .background(if (currentProject.isProxyModeEnabled) Color(0xFF35E6A0) else Color(0xFF888888))
+                        )
+                        Spacer(modifier = Modifier.width(3.dp))
+                        Text(
+                            text = if (currentProject.isProxyModeEnabled) "⚡ Proxy ON" else "⚡ Proxy OFF",
+                            color = if (currentProject.isProxyModeEnabled) Color(0xFF35E6A0) else Color(0xFF888888),
+                            fontSize = 8.5.sp,
+                            fontWeight = FontWeight.Bold,
+                            fontFamily = FontFamily.Monospace
+                        )
+                    }
+                }
+            }
+
+            // Large Responsive Centered Preview Viewport
+            BoxWithConstraints(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .heightIn(min = 200.dp, max = 265.dp)
+                    .padding(horizontal = 14.dp, vertical = 2.dp),
                 contentAlignment = Alignment.Center
             ) {
-                // Determine preview width based on aspect ratio or full width for code/script
-                val viewportWidth = when {
-                    viewportMode != "VIDEO" -> 360.dp
-                    currentProject.aspectRatio == "16:9" -> 280.dp
-                    currentProject.aspectRatio == "1:1" -> 220.dp
-                    currentProject.aspectRatio == "4:5" -> 200.dp
-                    currentProject.aspectRatio == "21:9" -> 300.dp
-                    else -> 180.dp
+                val maxH = maxHeight
+                val maxW = maxWidth
+                val previewModifier = when {
+                    viewportMode != "VIDEO" -> Modifier.fillMaxSize()
+                    currentProject.aspectRatio == "16:9" -> {
+                        val w = maxW.coerceAtMost(360.dp)
+                        val h = (w.value * 9f / 16f).dp.coerceAtMost(maxH)
+                        Modifier.size(width = w, height = h)
+                    }
+                    currentProject.aspectRatio == "1:1" -> {
+                        val s = minOf(maxH, maxW, 225.dp)
+                        Modifier.size(s)
+                    }
+                    currentProject.aspectRatio == "4:5" -> {
+                        val h = maxH.coerceAtMost(245.dp)
+                        val w = (h.value * 4f / 5f).dp.coerceAtMost(maxW)
+                        Modifier.size(width = w, height = h)
+                    }
+                    else -> { // "9:16" Shorts / Reels
+                        val h = maxH.coerceAtMost(255.dp)
+                        val w = (h.value * 9f / 16f).dp.coerceAtMost(maxW)
+                        Modifier.size(width = w, height = h)
+                    }
                 }
 
                 Surface(
-                    shape = RoundedCornerShape(18.dp),
+                    shape = RoundedCornerShape(16.dp),
                     color = Color.Black,
-                    border = BorderStroke(1.dp, Color(0x3500DAF3)),
+                    border = BorderStroke(1.5.dp, if (currentProject.isProxyModeEnabled) Color(0xFF35E6A0) else Color(0x6000DAF3)),
                     shadowElevation = 16.dp,
-                    modifier = Modifier
-                        .width(viewportWidth)
-                        .fillMaxHeight(0.92f)
+                    modifier = previewModifier
                 ) {
                     when (viewportMode) {
                         "CODE" -> {
@@ -662,12 +1216,11 @@ fun VideoTimelineStudioScreen(
                                         .padding(6.dp)
                                         .size(28.dp)
                                         .clip(CircleShape)
-                                        .background(Color.Black.copy(alpha = 0.6f))
                                 ) {
                                     Icon(Icons.Default.Fullscreen, contentDescription = "Fullscreen", tint = Color.White, modifier = Modifier.size(16.dp))
                                 }
 
-                                // Bottom left timecode pill
+                                // Bottom left exact timestamp pill
                                 Surface(
                                     shape = RoundedCornerShape(6.dp),
                                     color = Color.Black.copy(alpha = 0.75f),
@@ -679,8 +1232,8 @@ fun VideoTimelineStudioScreen(
                                         modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp),
                                         verticalAlignment = Alignment.CenterVertically
                                     ) {
-                                        Text(formatSeconds(currentProject.currentPositionSeconds), color = Color(0xFF00DAF3), fontSize = 9.sp, fontFamily = FontFamily.Monospace, fontWeight = FontWeight.Bold)
-                                        Text(" / ${formatSeconds(currentProject.totalDurationSeconds)}", color = Color.White.copy(alpha = 0.6f), fontSize = 8.5.sp, fontFamily = FontFamily.Monospace)
+                                        Text(formatExactTimestamp(currentProject.currentPositionSeconds), color = Color(0xFF00DAF3), fontSize = 9.sp, fontFamily = FontFamily.Monospace, fontWeight = FontWeight.Bold)
+                                        Text(" / ${formatExactTimestamp(currentProject.totalDurationSeconds)}", color = Color.White.copy(alpha = 0.6f), fontSize = 8.5.sp, fontFamily = FontFamily.Monospace)
                                     }
                                 }
                             }
@@ -697,34 +1250,58 @@ fun VideoTimelineStudioScreen(
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .padding(horizontal = 14.dp, vertical = 4.dp),
+                        .padding(horizontal = 10.dp, vertical = 4.dp),
                     horizontalArrangement = Arrangement.SpaceBetween,
                     verticalAlignment = Alignment.CenterVertically
                 ) {
+                    // Exact Timestamp display (00:00.0 / 00:00.0)
                     Row(verticalAlignment = Alignment.CenterVertically) {
-                        Text(formatSeconds(currentProject.currentPositionSeconds), color = Color(0xFF00DAF3), fontSize = 12.sp, fontWeight = FontWeight.Bold, fontFamily = FontFamily.Monospace)
-                        Text(" / ${formatSeconds(currentProject.totalDurationSeconds)}", color = Color(0xFFCCC3D9), fontSize = 11.sp, fontFamily = FontFamily.Monospace)
+                        Text(
+                            text = formatExactTimestamp(currentProject.currentPositionSeconds),
+                            color = Color(0xFF00DAF3),
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.Bold,
+                            fontFamily = FontFamily.Monospace
+                        )
+                        Text(
+                            text = " / ${formatExactTimestamp(currentProject.totalDurationSeconds)}",
+                            color = Color(0xFFCCC3D9),
+                            fontSize = 10.sp,
+                            fontFamily = FontFamily.Monospace
+                        )
                     }
 
-                    // Transport Play/Pause Row
+                    // Transport Play/Pause Row with Jump to Start & Jump to End
                     Row(
                         verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        horizontalArrangement = Arrangement.spacedBy(4.dp)
                     ) {
+                        // Jump to Start (|<<)
+                        IconButton(
+                            onClick = {
+                                currentProject = currentProject.copy(currentPositionSeconds = 0f)
+                                Toast.makeText(context, "|<< Start", Toast.LENGTH_SHORT).show()
+                            },
+                            modifier = Modifier.size(28.dp)
+                        ) {
+                            Icon(Icons.Default.FirstPage, contentDescription = "Jump to Start", tint = Color(0xFFCCC3D9), modifier = Modifier.size(18.dp))
+                        }
+
+                        // Replay -5s
                         IconButton(
                             onClick = {
                                 val next = (currentProject.currentPositionSeconds - 5f).coerceAtLeast(0f)
                                 currentProject = currentProject.copy(currentPositionSeconds = next)
-                                Toast.makeText(context, "-5s", Toast.LENGTH_SHORT).show()
                             },
-                            modifier = Modifier.size(32.dp)
+                            modifier = Modifier.size(28.dp)
                         ) {
-                            Icon(Icons.Default.Replay5, contentDescription = "-5s", tint = Color(0xFFCCC3D9), modifier = Modifier.size(20.dp))
+                            Icon(Icons.Default.Replay5, contentDescription = "-5s", tint = Color(0xFFCCC3D9), modifier = Modifier.size(18.dp))
                         }
 
+                        // Main Play / Pause Button
                         Box(
                             modifier = Modifier
-                                .size(40.dp)
+                                .size(38.dp)
                                 .clip(CircleShape)
                                 .background(
                                     Brush.linearGradient(
@@ -753,78 +1330,96 @@ fun VideoTimelineStudioScreen(
                                 imageVector = if (isPlaying) Icons.Default.Pause else Icons.Default.PlayArrow,
                                 contentDescription = "Play/Pause",
                                 tint = Color.White,
-                                modifier = Modifier.size(24.dp)
+                                modifier = Modifier.size(22.dp)
                             )
                         }
 
+                        // Forward +5s
                         IconButton(
                             onClick = {
                                 val next = (currentProject.currentPositionSeconds + 5f).coerceAtMost(currentProject.totalDurationSeconds)
                                 currentProject = currentProject.copy(currentPositionSeconds = next)
-                                Toast.makeText(context, "+5s", Toast.LENGTH_SHORT).show()
                             },
-                            modifier = Modifier.size(32.dp)
+                            modifier = Modifier.size(28.dp)
                         ) {
-                            Icon(Icons.Default.Forward5, contentDescription = "+5s", tint = Color(0xFFCCC3D9), modifier = Modifier.size(20.dp))
+                            Icon(Icons.Default.Forward5, contentDescription = "+5s", tint = Color(0xFFCCC3D9), modifier = Modifier.size(18.dp))
+                        }
+
+                        // Jump to End (>>|)
+                        IconButton(
+                            onClick = {
+                                currentProject = currentProject.copy(currentPositionSeconds = currentProject.totalDurationSeconds)
+                                Toast.makeText(context, ">>| End", Toast.LENGTH_SHORT).show()
+                            },
+                            modifier = Modifier.size(28.dp)
+                        ) {
+                            Icon(Icons.Default.LastPage, contentDescription = "Jump to End", tint = Color(0xFFCCC3D9), modifier = Modifier.size(18.dp))
                         }
                     }
 
-                    // Transport Actions: Split & Live Co-Director "Yahan se badlo" (Level 22) + Cut Delete
+                    // Transport Actions: Fullscreen, Split & Cut
                     Row(
                         verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                        horizontalArrangement = Arrangement.spacedBy(4.dp)
                     ) {
+                        IconButton(
+                            onClick = { showFullscreenPlayer = true },
+                            modifier = Modifier.size(28.dp)
+                        ) {
+                            Icon(Icons.Default.Fullscreen, contentDescription = "Fullscreen", tint = Color(0xFF00DAF3), modifier = Modifier.size(18.dp))
+                        }
+
                         Surface(
                             onClick = {
                                 isPlaying = false
                                 activeSubView = VideoStudioSubView.AI_DIRECTOR_CHAT
-                                Toast.makeText(context, "📍 Co-Director pinned at ${formatSeconds(currentProject.currentPositionSeconds)}", Toast.LENGTH_SHORT).show()
+                                Toast.makeText(context, "📍 Co-Director at ${formatExactTimestamp(currentProject.currentPositionSeconds)}", Toast.LENGTH_SHORT).show()
                             },
-                            shape = RoundedCornerShape(12.dp),
+                            shape = RoundedCornerShape(10.dp),
                             color = Color(0xFF1B1528),
                             border = BorderStroke(1.dp, Color(0x6000DAF3))
                         ) {
                             Row(
-                                modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
+                                modifier = Modifier.padding(horizontal = 6.dp, vertical = 3.dp),
                                 verticalAlignment = Alignment.CenterVertically
                             ) {
-                                Icon(Icons.Default.PinDrop, contentDescription = null, tint = Color(0xFF00DAF3), modifier = Modifier.size(13.dp))
-                                Spacer(modifier = Modifier.width(3.dp))
-                                Text("Yahan se badlo", color = Color(0xFF00DAF3), fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                                Icon(Icons.Default.PinDrop, contentDescription = null, tint = Color(0xFF00DAF3), modifier = Modifier.size(11.dp))
+                                Spacer(modifier = Modifier.width(2.dp))
+                                Text("Pin", color = Color(0xFF00DAF3), fontSize = 10.sp, fontWeight = FontWeight.Bold)
                             }
                         }
 
-                        // Split Button (Intelligent Playhead Split)
+                        // Split Button
                         Surface(
                             onClick = { applySmartSplit() },
-                            shape = RoundedCornerShape(12.dp),
+                            shape = RoundedCornerShape(10.dp),
                             color = Color(0xFF262530),
                             border = BorderStroke(1.dp, Color(0x8000DAF3))
                         ) {
                             Row(
-                                modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
+                                modifier = Modifier.padding(horizontal = 6.dp, vertical = 3.dp),
                                 verticalAlignment = Alignment.CenterVertically
                             ) {
-                                Icon(Icons.Default.ContentCut, contentDescription = null, tint = Color(0xFF00DAF3), modifier = Modifier.size(13.dp))
-                                Spacer(modifier = Modifier.width(3.dp))
-                                Text("Split ✂️", color = Color.White, fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                                Icon(Icons.Default.ContentCut, contentDescription = null, tint = Color(0xFF00DAF3), modifier = Modifier.size(11.dp))
+                                Spacer(modifier = Modifier.width(2.dp))
+                                Text("Split", color = Color.White, fontSize = 10.sp, fontWeight = FontWeight.Bold)
                             }
                         }
 
-                        // Cut / Delete Button (Ripple Delete)
+                        // Cut / Delete Button
                         Surface(
                             onClick = { applyCutDelete() },
-                            shape = RoundedCornerShape(12.dp),
+                            shape = RoundedCornerShape(10.dp),
                             color = Color(0xFF38151E),
                             border = BorderStroke(1.dp, Color(0x60FF4D6D))
                         ) {
                             Row(
-                                modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
+                                modifier = Modifier.padding(horizontal = 6.dp, vertical = 3.dp),
                                 verticalAlignment = Alignment.CenterVertically
                             ) {
-                                Icon(Icons.Default.DeleteOutline, contentDescription = null, tint = Color(0xFFFF4D6D), modifier = Modifier.size(13.dp))
-                                Spacer(modifier = Modifier.width(3.dp))
-                                Text("Cut 🗑️", color = Color(0xFFFF4D6D), fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                                Icon(Icons.Default.DeleteOutline, contentDescription = null, tint = Color(0xFFFF4D6D), modifier = Modifier.size(11.dp))
+                                Spacer(modifier = Modifier.width(2.dp))
+                                Text("Cut", color = Color(0xFFFF4D6D), fontSize = 10.sp, fontWeight = FontWeight.Bold)
                             }
                         }
                     }
@@ -891,7 +1486,38 @@ fun VideoTimelineStudioScreen(
                     }
                 }
 
-                Spacer(modifier = Modifier.width(8.dp))
+                Spacer(modifier = Modifier.width(6.dp))
+
+                // External AI Tools Feature Button (Silence Cut, Subtitles, Ducking, Reframe)
+                Surface(
+                    onClick = { showAiToolsModal = true },
+                    shape = RoundedCornerShape(22.dp),
+                    color = Color(0xFF1E1735),
+                    border = BorderStroke(1.dp, Color(0xFF00DAF3).copy(alpha = 0.6f)),
+                    shadowElevation = 6.dp,
+                    modifier = Modifier.height(42.dp)
+                ) {
+                    Row(
+                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.AutoFixHigh,
+                            contentDescription = "AI Tools",
+                            tint = Color(0xFF00DAF3),
+                            modifier = Modifier.size(16.dp)
+                        )
+                        Spacer(modifier = Modifier.width(4.dp))
+                        Text(
+                            text = "AI TOOLS",
+                            color = Color.White,
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.Bold
+                        )
+                    }
+                }
+
+                Spacer(modifier = Modifier.width(6.dp))
 
                 // Chat Bubble Director Shortcut
                 IconButton(
@@ -910,446 +1536,1095 @@ fun VideoTimelineStudioScreen(
                 }
             }
 
-            // --- 5. Multi-Track Timeline (220px) ---
+            // --- 5. Pro NLE Multi-Track Timeline (Scroll & Zoom Fix + 6 Dedicated Color-Coded Tracks) ---
+            val safeTotalSeconds = if (currentProject.totalDurationSeconds > 0.5f) {
+                currentProject.totalDurationSeconds
+            } else {
+                val clipSum = currentProject.clips.sumOf { it.durationSeconds.toDouble() }.toFloat()
+                if (clipSum > 0.5f) clipSum else 15.0f
+            }
+            val pixelsPerSecond = (36f * timelineZoom).dp
+            val timelineWidth = (safeTotalSeconds * pixelsPerSecond.value).dp.coerceAtLeast(420.dp)
+            val timelineVerticalScrollState = rememberScrollState()
+            val timelineHorizontalScrollState = rememberScrollState()
+
             Surface(
-                color = Color(0xFF0A0A0A),
+                color = Color(0xFF09090C),
                 modifier = Modifier
                     .fillMaxWidth()
-                    .height(210.dp)
+                    .weight(1f)
             ) {
                 Column(modifier = Modifier.fillMaxSize()) {
-                    // Timeline Track Info Header
+                    // Timeline Top Control Bar (Tracks count, Snap toggle, and Zoom slider controls)
                     Row(
                         modifier = Modifier
                             .fillMaxWidth()
-                            .background(Color(0xFF0E0E0E))
-                            .padding(horizontal = 14.dp, vertical = 4.dp),
+                            .background(Color(0xFF0E0E12))
+                            .padding(horizontal = 10.dp, vertical = 3.dp),
                         horizontalArrangement = Arrangement.SpaceBetween,
                         verticalAlignment = Alignment.CenterVertically
                     ) {
+                        // Track Count & Magnet Snap Toggle
                         Row(verticalAlignment = Alignment.CenterVertically) {
-                            Icon(Icons.Default.ViewTimeline, contentDescription = null, tint = Color(0xFFCCC3D9), modifier = Modifier.size(13.dp))
+                            Icon(Icons.Default.ViewTimeline, contentDescription = null, tint = Color(0xFF00DAF3), modifier = Modifier.size(13.dp))
                             Spacer(modifier = Modifier.width(4.dp))
-                            Text("5 TRACKS", color = Color(0xFFCCC3D9), fontSize = 10.sp, fontFamily = FontFamily.Monospace)
-                            Text(" · ", color = Color.White.copy(alpha = 0.3f), fontSize = 10.sp)
-                            Text("SNAP ON", color = Color(0xFFCCC3D9), fontSize = 10.sp, fontFamily = FontFamily.Monospace)
+                            Text("6 TRACKS", color = Color(0xFF00DAF3), fontSize = 10.sp, fontWeight = FontWeight.Bold, fontFamily = FontFamily.Monospace)
+                            Spacer(modifier = Modifier.width(6.dp))
+
+                            Surface(
+                                onClick = {
+                                    isSnapEnabled = !isSnapEnabled
+                                    Toast.makeText(context, if (isSnapEnabled) "🧲 Snap to Cuts ON" else "Snap OFF", Toast.LENGTH_SHORT).show()
+                                },
+                                shape = RoundedCornerShape(4.dp),
+                                color = if (isSnapEnabled) Color(0xFF00DAF3).copy(alpha = 0.2f) else Color(0xFF202028),
+                                border = BorderStroke(0.5.dp, if (isSnapEnabled) Color(0xFF00DAF3) else Color(0x40FFFFFF))
+                            ) {
+                                Row(
+                                    modifier = Modifier.padding(horizontal = 5.dp, vertical = 2.dp),
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Text(
+                                        text = if (isSnapEnabled) "🧲 SNAP ON" else "SNAP OFF",
+                                        color = if (isSnapEnabled) Color(0xFF00DAF3) else Color(0xFF888888),
+                                        fontSize = 8.5.sp,
+                                        fontFamily = FontFamily.Monospace,
+                                        fontWeight = FontWeight.Bold
+                                    )
+                                }
+                            }
                         }
 
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            Text("100%", color = Color(0xFF00DAF3), fontSize = 10.sp, fontFamily = FontFamily.Monospace)
-                            Spacer(modifier = Modifier.width(6.dp))
-                            Surface(shape = RoundedCornerShape(4.dp), color = Color(0xFF2A2A2A)) {
-                                Text("FIT", color = Color.White, fontSize = 9.sp, modifier = Modifier.padding(horizontal = 4.dp, vertical = 2.dp))
+                        // Dedicated Zoom Controls (Zoom Out `-`, Slider, Zoom In `+`, and `[FIT]`)
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(4.dp)
+                        ) {
+                            IconButton(
+                                onClick = { timelineZoom = (timelineZoom - 0.25f).coerceAtLeast(0.5f) },
+                                modifier = Modifier.size(24.dp)
+                            ) {
+                                Icon(Icons.Default.Remove, contentDescription = "Zoom Out", tint = Color(0xFFCCC3D9), modifier = Modifier.size(14.dp))
+                            }
+
+                            Slider(
+                                value = timelineZoom,
+                                onValueChange = { timelineZoom = it },
+                                valueRange = 0.5f..3.5f,
+                                modifier = Modifier
+                                    .width(80.dp)
+                                    .height(20.dp),
+                                colors = SliderDefaults.colors(
+                                    thumbColor = Color(0xFF00DAF3),
+                                    activeTrackColor = Color(0xFF00DAF3),
+                                    inactiveTrackColor = Color(0xFF262535)
+                                )
+                            )
+
+                            IconButton(
+                                onClick = { timelineZoom = (timelineZoom + 0.25f).coerceAtMost(3.5f) },
+                                modifier = Modifier.size(24.dp)
+                            ) {
+                                Icon(Icons.Default.Add, contentDescription = "Zoom In", tint = Color(0xFFCCC3D9), modifier = Modifier.size(14.dp))
+                            }
+
+                            Text(
+                                text = "${(timelineZoom * 100).toInt()}%",
+                                color = Color(0xFF00DAF3),
+                                fontSize = 9.sp,
+                                fontFamily = FontFamily.Monospace,
+                                fontWeight = FontWeight.Bold
+                            )
+
+                            Surface(
+                                onClick = {
+                                    timelineZoom = 1.0f
+                                    Toast.makeText(context, "Fit to Screen", Toast.LENGTH_SHORT).show()
+                                },
+                                shape = RoundedCornerShape(4.dp),
+                                color = Color(0xFF262535)
+                            ) {
+                                Text("FIT", color = Color.White, fontSize = 8.5.sp, fontWeight = FontWeight.Bold, modifier = Modifier.padding(horizontal = 4.dp, vertical = 2.dp))
                             }
                         }
                     }
 
-                    // Ticker / Ruler
+                    // Selected Item Quick Action Toolbar
                     Row(
                         modifier = Modifier
                             .fillMaxWidth()
-                            .background(Color(0xFF0E0E0E))
-                            .padding(horizontal = 16.dp, vertical = 2.dp),
-                        horizontalArrangement = Arrangement.SpaceBetween
+                            .background(Color(0xFF131218))
+                            .padding(horizontal = 10.dp, vertical = 2.dp),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
                     ) {
-                        listOf("00:00", "00:05", "00:10", "00:15", "00:20").forEach { mark ->
-                            Text(mark, color = Color.White.copy(alpha = 0.4f), fontSize = 9.sp, fontFamily = FontFamily.Monospace)
-                        }
-                    }
-
-                    // Quick Action Editing Toolbar for Selected Clip
-                    if (currentProject.clips.isNotEmpty()) {
+                        Text(
+                            text = "Track $selectedTrackNum · Active: ${
+                                when (selectedTrackNum) {
+                                    1 -> "Code Motion Graphics"
+                                    2 -> currentProject.clips.getOrNull(currentProject.selectedClipIndex)?.name ?: "Video Clip"
+                                    3 -> "Visual Asset Overlay"
+                                    4 -> "Kinetic Subtitle"
+                                    5 -> "AI Voice Narration"
+                                    else -> "Audio FX & BGM"
+                                }
+                            }",
+                            color = Color(0xFFD1BCFF),
+                            fontSize = 9.sp,
+                            fontFamily = FontFamily.Monospace,
+                            maxLines = 1,
+                            modifier = Modifier.weight(1f)
+                        )
                         Row(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .background(Color(0xFF14131A))
-                                .padding(horizontal = 10.dp, vertical = 3.dp),
-                            horizontalArrangement = Arrangement.SpaceBetween,
+                            horizontalArrangement = Arrangement.spacedBy(4.dp),
                             verticalAlignment = Alignment.CenterVertically
                         ) {
-                            Text(
-                                text = "Selected: ${currentProject.clips.getOrNull(currentProject.selectedClipIndex)?.name ?: "Clip"}",
-                                color = Color(0xFFCCC3D9),
-                                fontSize = 9.5.sp,
-                                fontWeight = FontWeight.SemiBold,
-                                maxLines = 1,
-                                modifier = Modifier.weight(1f)
-                            )
-                            Row(
-                                horizontalArrangement = Arrangement.spacedBy(4.dp),
-                                verticalAlignment = Alignment.CenterVertically
+                            Surface(
+                                onClick = { activeToolTab = VideoStudioToolTab.TUNE },
+                                shape = RoundedCornerShape(4.dp),
+                                color = if (activeToolTab == VideoStudioToolTab.TUNE) Color(0xFF00DAF3).copy(alpha = 0.3f) else Color(0xFF232230),
+                                border = BorderStroke(0.5.dp, Color(0xFF00DAF3))
                             ) {
-                                Surface(
-                                    onClick = { applySmartSplit() },
-                                    shape = RoundedCornerShape(6.dp),
-                                    color = Color(0xFF262530),
-                                    border = BorderStroke(1.dp, Color(0x6000DAF3))
-                                ) {
-                                    Row(modifier = Modifier.padding(horizontal = 6.dp, vertical = 3.dp), verticalAlignment = Alignment.CenterVertically) {
-                                        Icon(Icons.Default.ContentCut, contentDescription = null, tint = Color(0xFF00DAF3), modifier = Modifier.size(11.dp))
-                                        Spacer(modifier = Modifier.width(2.dp))
-                                        Text("Split", color = Color(0xFF00DAF3), fontSize = 9.sp, fontWeight = FontWeight.Bold)
-                                    }
-                                }
-                                Surface(
-                                    onClick = { applyCutHead() },
-                                    shape = RoundedCornerShape(6.dp),
-                                    color = Color(0xFF262530)
-                                ) {
-                                    Row(modifier = Modifier.padding(horizontal = 5.dp, vertical = 3.dp), verticalAlignment = Alignment.CenterVertically) {
-                                        Text("✂️◀ Head", color = Color.White, fontSize = 8.5.sp)
-                                    }
-                                }
-                                Surface(
-                                    onClick = { applyCutTail() },
-                                    shape = RoundedCornerShape(6.dp),
-                                    color = Color(0xFF262530)
-                                ) {
-                                    Row(modifier = Modifier.padding(horizontal = 5.dp, vertical = 3.dp), verticalAlignment = Alignment.CenterVertically) {
-                                        Text("Tail ▶✂️", color = Color.White, fontSize = 8.5.sp)
-                                    }
-                                }
-                                Surface(
-                                    onClick = { applyDuplicateClip() },
-                                    shape = RoundedCornerShape(6.dp),
-                                    color = Color(0xFF262530)
-                                ) {
-                                    Row(modifier = Modifier.padding(horizontal = 5.dp, vertical = 3.dp), verticalAlignment = Alignment.CenterVertically) {
-                                        Text("+ Dup", color = Color.White, fontSize = 8.5.sp)
-                                    }
-                                }
-                                Surface(
-                                    onClick = { applyCutDelete() },
-                                    shape = RoundedCornerShape(6.dp),
-                                    color = Color(0xFF4A151E),
-                                    border = BorderStroke(1.dp, Color(0x60FF4D6D))
-                                ) {
-                                    Row(modifier = Modifier.padding(horizontal = 6.dp, vertical = 3.dp), verticalAlignment = Alignment.CenterVertically) {
-                                        Icon(Icons.Default.DeleteOutline, contentDescription = null, tint = Color(0xFFFF4D6D), modifier = Modifier.size(11.dp))
-                                        Spacer(modifier = Modifier.width(2.dp))
-                                        Text("Del", color = Color(0xFFFF4D6D), fontSize = 8.5.sp, fontWeight = FontWeight.Bold)
-                                    }
-                                }
+                                Text("Tune 🎛️", color = Color(0xFF00DAF3), fontSize = 8.5.sp, fontWeight = FontWeight.Bold, modifier = Modifier.padding(horizontal = 5.dp, vertical = 2.dp))
+                            }
+                            Surface(
+                                onClick = { applySmartSplit() },
+                                shape = RoundedCornerShape(4.dp),
+                                color = Color(0xFF232230)
+                            ) {
+                                Text("Split ✂️", color = Color(0xFF00DAF3), fontSize = 8.5.sp, modifier = Modifier.padding(horizontal = 4.dp, vertical = 2.dp))
+                            }
+                            Surface(
+                                onClick = { activeSubView = VideoStudioSubView.AI_VIDEO_GENERATOR },
+                                shape = RoundedCornerShape(4.dp),
+                                color = Color(0xFF2E1954),
+                                border = BorderStroke(1.dp, Color(0xFF7B2BFF))
+                            ) {
+                                Text("AI Video 🎬", color = Color(0xFFD1BCFF), fontSize = 8.5.sp, fontWeight = FontWeight.Bold, modifier = Modifier.padding(horizontal = 4.dp, vertical = 2.dp))
+                            }
+                            Surface(
+                                onClick = { applyLayerOrder(bringForward = true) },
+                                shape = RoundedCornerShape(4.dp),
+                                color = Color(0xFF232230)
+                            ) {
+                                Text("▲ Layer", color = Color(0xFFCCC3D9), fontSize = 8.5.sp, modifier = Modifier.padding(horizontal = 4.dp, vertical = 2.dp))
+                            }
+                            Surface(
+                                onClick = { applyLayerOrder(bringForward = false) },
+                                shape = RoundedCornerShape(4.dp),
+                                color = Color(0xFF232230)
+                            ) {
+                                Text("Layer ▼", color = Color(0xFFCCC3D9), fontSize = 8.5.sp, modifier = Modifier.padding(horizontal = 4.dp, vertical = 2.dp))
+                            }
+                            Surface(
+                                onClick = { applyCutHead() },
+                                shape = RoundedCornerShape(4.dp),
+                                color = Color(0xFF232230)
+                            ) {
+                                Text("✂️ Head", color = Color.White, fontSize = 8.5.sp, modifier = Modifier.padding(horizontal = 3.dp, vertical = 2.dp))
+                            }
+                            Surface(
+                                onClick = { applyCutTail() },
+                                shape = RoundedCornerShape(4.dp),
+                                color = Color(0xFF232230)
+                            ) {
+                                Text("Tail ✂️", color = Color.White, fontSize = 8.5.sp, modifier = Modifier.padding(horizontal = 3.dp, vertical = 2.dp))
+                            }
+                            Surface(
+                                onClick = { applyDuplicateClip() },
+                                shape = RoundedCornerShape(4.dp),
+                                color = Color(0xFF232230)
+                            ) {
+                                Text("+ Dup", color = Color.White, fontSize = 8.5.sp, modifier = Modifier.padding(horizontal = 4.dp, vertical = 2.dp))
+                            }
+                            Surface(
+                                onClick = { applyCutDelete() },
+                                shape = RoundedCornerShape(4.dp),
+                                color = Color(0xFF45131C)
+                            ) {
+                                Text("Del 🗑️", color = Color(0xFFFF4D6D), fontSize = 8.5.sp, modifier = Modifier.padding(horizontal = 4.dp, vertical = 2.dp))
                             }
                         }
                     }
 
-                    // Multi-Track Container with Red/Cyan Playhead
-                    Box(
+                    // Multi-Track Viewport with Fixed Left Track Headers & Synchronized Right Scrollable Lanes
+                    Row(
                         modifier = Modifier
                             .fillMaxWidth()
                             .weight(1f)
-                            .background(Color(0xFF0D0D0D))
-                            .padding(horizontal = 10.dp, vertical = 4.dp)
                     ) {
+                        // Left Fixed Track Headers Column (Always visible, scrolls vertically in sync)
                         Column(
                             modifier = Modifier
-                                .fillMaxSize()
-                                .horizontalScroll(rememberScrollState()),
+                                .width(82.dp)
+                                .fillMaxHeight()
+                                .background(Color(0xFF0D0C12))
+                                .verticalScroll(timelineVerticalScrollState),
                             verticalArrangement = Arrangement.spacedBy(4.dp)
                         ) {
-                            // Track 1: Video Track
-                            Row(
+                            // Top Ruler Spacer
+                            Box(
                                 modifier = Modifier
-                                    .height(48.dp)
-                                    .clip(RoundedCornerShape(8.dp))
-                                    .background(Color(0xFF201F1F).copy(alpha = 0.6f))
-                                    .padding(3.dp),
-                                horizontalArrangement = Arrangement.spacedBy(4.dp),
-                                verticalAlignment = Alignment.CenterVertically
+                                    .fillMaxWidth()
+                                    .height(24.dp)
+                                    .background(Color(0xFF0A090E))
+                                    .padding(horizontal = 4.dp),
+                                contentAlignment = Alignment.CenterStart
                             ) {
-                                if (currentProject.clips.isEmpty()) {
-                                    Surface(
-                                        shape = RoundedCornerShape(6.dp),
-                                        color = Color(0xFF7B2BFF).copy(alpha = 0.25f),
-                                        modifier = Modifier
-                                            .width(180.dp)
-                                            .fillMaxHeight()
-                                    ) {
-                                        Box(contentAlignment = Alignment.Center) {
-                                            Text("Blank Timeline Canvas", color = Color(0xFF00DAF3), fontSize = 10.sp, fontWeight = FontWeight.Bold)
-                                        }
-                                    }
-                                } else {
-                                    currentProject.clips.forEachIndexed { index, clip ->
-                                        val isSelected = index == currentProject.selectedClipIndex
-                                        val clipWidth = (clip.durationSeconds * 22).dp.coerceIn(95.dp, 300.dp)
-                                        Surface(
-                                            onClick = {
-                                                var startOfClip = 0f
-                                                for (k in 0 until index) {
-                                                    startOfClip += currentProject.clips[k].durationSeconds
-                                                }
-                                                val endOfClip = startOfClip + clip.durationSeconds
-                                                val newPos = if (currentProject.currentPositionSeconds in startOfClip..endOfClip) {
-                                                    currentProject.currentPositionSeconds
-                                                } else {
-                                                    startOfClip
-                                                }
-                                                currentProject = currentProject.copy(selectedClipIndex = index, currentPositionSeconds = newPos)
-                                                activeToolTab = VideoStudioToolTab.EDIT
-                                            },
-                                            shape = RoundedCornerShape(6.dp),
-                                            color = if (isSelected) Color(0xFF7B2BFF).copy(alpha = 0.5f) else Color(0xFF7B2BFF).copy(alpha = 0.2f),
-                                            border = if (isSelected) BorderStroke(1.5.dp, Color(0xFF00DAF3)) else null,
-                                            modifier = Modifier
-                                                .width(clipWidth)
-                                                .fillMaxHeight()
-                                        ) {
-                                            Column(
-                                                modifier = Modifier.padding(4.dp),
-                                                verticalArrangement = Arrangement.SpaceBetween
-                                            ) {
-                                                Row(
-                                                    modifier = Modifier.fillMaxWidth(),
-                                                    horizontalArrangement = Arrangement.SpaceBetween,
-                                                    verticalAlignment = Alignment.CenterVertically
-                                                ) {
-                                                    Text(clip.name, color = Color.White, fontSize = 9.sp, fontWeight = FontWeight.Bold, maxLines = 1, modifier = Modifier.weight(1f))
-                                                    if (clip.name.contains("_cut") || clip.name.contains("_part")) {
-                                                        Surface(
-                                                            shape = RoundedCornerShape(2.dp),
-                                                            color = Color(0xFF00DAF3).copy(alpha = 0.25f),
-                                                            modifier = Modifier.padding(end = 2.dp)
-                                                        ) {
-                                                            Text("✂️ CUT", color = Color(0xFF00DAF3), fontSize = 6.5.sp, fontWeight = FontWeight.Bold, modifier = Modifier.padding(horizontal = 2.dp))
-                                                        }
-                                                    }
-                                                    if (clip.isAiEnhanced || clip.origin == "ai") {
-                                                        Surface(
-                                                            onClick = {
-                                                                val reason = clip.aiWhy.ifBlank { "Optimized by SAIF AI neural engine for dynamic pacing & visual impact." }
-                                                                Toast.makeText(context, "✦ AI Rationale: $reason", Toast.LENGTH_LONG).show()
-                                                            },
-                                                            shape = RoundedCornerShape(2.dp),
-                                                            color = Color(0xFFD1BCFF)
-                                                        ) {
-                                                            Text("AI ✦", color = Color(0xFF3D008F), fontSize = 7.sp, fontWeight = FontWeight.ExtraBold, modifier = Modifier.padding(horizontal = 2.dp))
-                                                        }
-                                                    }
-                                                }
-                                                Text("Speed ${clip.speed}x · ${"%.1f".format(clip.durationSeconds)}s", color = Color(0xFF9CF0FF), fontSize = 8.sp, fontFamily = FontFamily.Monospace)
-                                            }
-                                        }
-                                    }
-                                }
-
-                                // + Button to add 50+ media from gallery
-                                Surface(
-                                    onClick = {
-                                        addMoreMediaLauncher.launch(
-                                            PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageAndVideo)
-                                        )
-                                    },
-                                    shape = RoundedCornerShape(6.dp),
-                                    color = Color(0xFF2A2A2A),
-                                    modifier = Modifier
-                                        .size(34.dp)
-                                        .fillMaxHeight()
-                                ) {
-                                    Box(contentAlignment = Alignment.Center) {
-                                        Icon(Icons.Default.Add, contentDescription = "Add Media", tint = Color.White, modifier = Modifier.size(18.dp))
-                                    }
-                                }
+                                Text("TRACK", color = Color(0xFF888496), fontSize = 8.sp, fontFamily = FontFamily.Monospace, fontWeight = FontWeight.Bold)
                             }
 
-                            // Track 2: Audio Track (Waveform visualization, clickable to open Audio tab)
+                            // Track 1 Header: Code Animations
                             Surface(
-                                onClick = { activeToolTab = VideoStudioToolTab.AUDIO },
-                                shape = RoundedCornerShape(8.dp),
-                                color = Color(0xFF201F1F).copy(alpha = 0.6f),
+                                onClick = { selectedTrackNum = 1; activeToolTab = VideoStudioToolTab.EDIT },
+                                color = if (selectedTrackNum == 1) Color(0xFF00F5A0).copy(alpha = 0.25f) else Color(0xFF131D18),
+                                border = if (selectedTrackNum == 1) BorderStroke(1.dp, Color(0xFF00F5A0)) else null,
+                                shape = RoundedCornerShape(topStart = 4.dp, bottomStart = 4.dp),
                                 modifier = Modifier
-                                    .height(34.dp)
-                                    .width(360.dp)
+                                    .fillMaxWidth()
+                                    .height(44.dp)
+                                    .padding(start = 2.dp)
                             ) {
-                                Row(
-                                    modifier = Modifier
-                                        .fillMaxSize()
-                                        .background(Color(0xFF35E6A0).copy(alpha = 0.15f))
-                                        .padding(horizontal = 8.dp),
-                                    verticalAlignment = Alignment.CenterVertically
-                                ) {
-                                    Icon(Icons.Default.MusicNote, contentDescription = null, tint = Color(0xFF35E6A0), modifier = Modifier.size(14.dp))
-                                    Spacer(modifier = Modifier.width(6.dp))
-                                    // Decorative waveform ticks
-                                    Row(
-                                        modifier = Modifier.weight(1f),
-                                        horizontalArrangement = Arrangement.spacedBy(2.dp),
-                                        verticalAlignment = Alignment.CenterVertically
-                                    ) {
-                                        listOf(10, 16, 8, 20, 12, 18, 6, 22, 14, 18, 10, 16, 24, 12, 19, 8, 14, 20, 10, 15).forEach { h ->
-                                            Box(
-                                                modifier = Modifier
-                                                    .width(2.dp)
-                                                    .height(h.dp)
-                                                    .clip(RoundedCornerShape(1.dp))
-                                                    .background(Color(0xFF35E6A0).copy(alpha = 0.8f))
-                                            )
-                                        }
-                                    }
-                                    Spacer(modifier = Modifier.width(6.dp))
-                                    Text(currentProject.audioTrackName, color = Color(0xFF35E6A0), fontSize = 9.sp, fontFamily = FontFamily.Monospace, fontWeight = FontWeight.Medium)
-                                }
-                            }
-
-                            // Track 2B: SFX & Sound Effects Track (Telegram Catalog SFX)
-                            val sfxItems = currentProject.timelineMarkers.filter { it.label.startsWith("🔊") }
-                            Surface(
-                                onClick = { activeToolTab = VideoStudioToolTab.AUDIO },
-                                shape = RoundedCornerShape(8.dp),
-                                color = Color(0xFF201F1F).copy(alpha = 0.6f),
-                                modifier = Modifier
-                                    .height(30.dp)
-                                    .width(360.dp)
-                            ) {
-                                Row(
-                                    modifier = Modifier
-                                        .fillMaxSize()
-                                        .background(Color(0xFFFF7AD9).copy(alpha = 0.12f))
-                                        .padding(horizontal = 8.dp),
-                                    verticalAlignment = Alignment.CenterVertically,
-                                    horizontalArrangement = Arrangement.spacedBy(6.dp)
-                                ) {
-                                    Icon(Icons.Default.GraphicEq, contentDescription = null, tint = Color(0xFFFF7AD9), modifier = Modifier.size(13.dp))
-                                    Text("SFX", color = Color(0xFFFF7AD9), fontSize = 8.5.sp, fontFamily = FontFamily.Monospace, fontWeight = FontWeight.Bold)
-                                    if (sfxItems.isEmpty()) {
-                                        listOf("🔊 Whoosh (0s)", "🔊 Riser (3.5s)", "🔊 Ding (10.5s)", "🔊 Pop (14.5s)").forEach { sfx ->
-                                            Surface(
-                                                shape = RoundedCornerShape(4.dp),
-                                                color = Color(0xFFFF7AD9).copy(alpha = 0.25f),
-                                                border = BorderStroke(0.5.dp, Color(0xFFFF7AD9))
-                                            ) {
-                                                Text(sfx, color = Color.White, fontSize = 7.5.sp, fontFamily = FontFamily.Monospace, modifier = Modifier.padding(horizontal = 4.dp, vertical = 2.dp))
-                                            }
-                                        }
-                                    } else {
-                                        sfxItems.forEach { sfx ->
-                                            Surface(
-                                                shape = RoundedCornerShape(4.dp),
-                                                color = Color(0xFFFF7AD9).copy(alpha = 0.25f),
-                                                border = BorderStroke(0.5.dp, Color(0xFFFF7AD9))
-                                            ) {
-                                                Text("${sfx.label} (${"%.1f".format(sfx.timestampSeconds)}s)", color = Color.White, fontSize = 7.5.sp, fontFamily = FontFamily.Monospace, modifier = Modifier.padding(horizontal = 4.dp, vertical = 2.dp))
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-
-                            // Track 3: Text Track (Clickable to open Text tool)
-                            Surface(
-                                onClick = { activeToolTab = VideoStudioToolTab.TEXT },
-                                shape = RoundedCornerShape(8.dp),
-                                color = Color(0xFF201F1F).copy(alpha = 0.6f),
-                                modifier = Modifier
-                                    .height(34.dp)
-                                    .width(360.dp)
-                            ) {
-                                Row(
-                                    modifier = Modifier
-                                        .fillMaxSize()
-                                        .padding(start = 70.dp, end = 100.dp)
-                                        .clip(RoundedCornerShape(6.dp))
-                                        .background(Color(0xFFFFC44D).copy(alpha = 0.2f))
-                                        .padding(horizontal = 8.dp),
-                                    verticalAlignment = Alignment.CenterVertically,
-                                    horizontalArrangement = Arrangement.SpaceBetween
-                                ) {
+                                Column(modifier = Modifier.padding(4.dp), verticalArrangement = Arrangement.Center) {
                                     Row(verticalAlignment = Alignment.CenterVertically) {
-                                        Icon(Icons.Default.Title, contentDescription = null, tint = Color(0xFFFFC44D), modifier = Modifier.size(13.dp))
-                                        Spacer(modifier = Modifier.width(4.dp))
-                                        Text(currentProject.textOverlay, color = Color.White, fontSize = 9.sp, fontWeight = FontWeight.Bold, fontFamily = FontFamily.Monospace)
+                                        Text("< / >", color = Color(0xFF00F5A0), fontSize = 9.sp, fontWeight = FontWeight.Bold)
+                                        Spacer(modifier = Modifier.width(3.dp))
+                                        Text("Code", color = Color.White, fontSize = 9.sp, fontWeight = FontWeight.Bold)
                                     }
-                                    Text(currentProject.textAnimation, color = Color(0xFFFFC44D).copy(alpha = 0.8f), fontSize = 8.sp, fontFamily = FontFamily.Monospace)
+                                    Text("HTML/GSAP", color = Color(0xFF00F5A0).copy(alpha = 0.8f), fontSize = 7.sp, fontFamily = FontFamily.Monospace)
                                 }
                             }
 
-                            // Track 4: Effects / Filter Track (Clickable to open Effects sheet)
+                            // Track 2 Header: Video / B-Roll
                             Surface(
-                                onClick = { activeToolTab = VideoStudioToolTab.EFFECTS },
-                                shape = RoundedCornerShape(8.dp),
-                                color = Color(0xFF201F1F).copy(alpha = 0.6f),
+                                onClick = { selectedTrackNum = 2; activeToolTab = VideoStudioToolTab.EDIT },
+                                color = if (selectedTrackNum == 2) Color(0xFF7B2BFF).copy(alpha = 0.25f) else Color(0xFF1A1426),
+                                border = if (selectedTrackNum == 2) BorderStroke(1.dp, Color(0xFF00DAF3)) else null,
+                                shape = RoundedCornerShape(topStart = 4.dp, bottomStart = 4.dp),
                                 modifier = Modifier
-                                    .height(34.dp)
-                                    .width(360.dp)
+                                    .fillMaxWidth()
+                                    .height(50.dp)
+                                    .padding(start = 2.dp)
                             ) {
-                                Row(
-                                    modifier = Modifier
-                                        .fillMaxSize()
-                                        .padding(start = 35.dp, end = 140.dp)
-                                        .clip(RoundedCornerShape(6.dp))
-                                        .background(Color(0xFFFF7AD9).copy(alpha = 0.2f))
-                                        .padding(horizontal = 8.dp),
-                                    verticalAlignment = Alignment.CenterVertically
-                                ) {
-                                    Icon(Icons.Default.Flare, contentDescription = null, tint = Color(0xFFFF7AD9), modifier = Modifier.size(12.dp))
-                                    Spacer(modifier = Modifier.width(4.dp))
-                                    Text(currentProject.effectOverlay, color = Color(0xFFFF7AD9), fontSize = 9.sp, fontFamily = FontFamily.Monospace, fontWeight = FontWeight.Medium)
+                                Column(modifier = Modifier.padding(4.dp), verticalArrangement = Arrangement.Center) {
+                                    Row(verticalAlignment = Alignment.CenterVertically) {
+                                        Icon(Icons.Default.Movie, contentDescription = null, tint = Color(0xFFC084FC), modifier = Modifier.size(11.dp))
+                                        Spacer(modifier = Modifier.width(3.dp))
+                                        Text("Video", color = Color.White, fontSize = 9.sp, fontWeight = FontWeight.Bold)
+                                    }
+                                    Text("B-Roll / 4K", color = Color(0xFFC084FC), fontSize = 7.sp, fontFamily = FontFamily.Monospace)
                                 }
                             }
 
-                            // Track 5: AI Auto-Captions (When active)
-                            if (currentProject.autoCaptions.isNotEmpty()) {
-                                Surface(
-                                    onClick = { Toast.makeText(context, "AI Subtitles synced with karaoke highlights", Toast.LENGTH_SHORT).show() },
-                                    shape = RoundedCornerShape(8.dp),
-                                    color = Color(0xFF201F1F).copy(alpha = 0.6f),
-                                    modifier = Modifier.height(30.dp).width(360.dp)
-                                ) {
-                                    Row(
-                                        modifier = Modifier
-                                            .fillMaxSize()
-                                            .background(Color(0xFF00DAF3).copy(alpha = 0.15f))
-                                            .padding(horizontal = 8.dp),
-                                        verticalAlignment = Alignment.CenterVertically
-                                    ) {
-                                        Icon(Icons.Default.Subtitles, contentDescription = null, tint = Color(0xFF00DAF3), modifier = Modifier.size(12.dp))
-                                        Spacer(modifier = Modifier.width(6.dp))
-                                        Text("AI CAPTIONS • ${currentProject.autoCaptions.size} Lines", color = Color(0xFF00DAF3), fontSize = 8.5.sp, fontFamily = FontFamily.Monospace)
+                            // Track 3 Header: Visual Assets & Stickers
+                            Surface(
+                                onClick = { selectedTrackNum = 3; activeToolTab = VideoStudioToolTab.OVERLAY },
+                                color = if (selectedTrackNum == 3) Color(0xFFFF9F1C).copy(alpha = 0.25f) else Color(0xFF221708),
+                                border = if (selectedTrackNum == 3) BorderStroke(1.dp, Color(0xFFFFB703)) else null,
+                                shape = RoundedCornerShape(topStart = 4.dp, bottomStart = 4.dp),
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .height(40.dp)
+                                    .padding(start = 2.dp)
+                            ) {
+                                Column(modifier = Modifier.padding(4.dp), verticalArrangement = Arrangement.Center) {
+                                    Row(verticalAlignment = Alignment.CenterVertically) {
+                                        Icon(Icons.Default.Palette, contentDescription = null, tint = Color(0xFFFFB703), modifier = Modifier.size(11.dp))
+                                        Spacer(modifier = Modifier.width(3.dp))
+                                        Text("Assets", color = Color.White, fontSize = 9.sp, fontWeight = FontWeight.Bold)
                                     }
+                                    Text("Telegram", color = Color(0xFFFFB703), fontSize = 7.sp, fontFamily = FontFamily.Monospace)
                                 }
                             }
 
-                            // Track 6: AI B-Roll Visuals (When active)
-                            if (currentProject.bRollItems.isNotEmpty()) {
-                                Surface(
-                                    onClick = { Toast.makeText(context, "AI B-Roll cutaway sequence active", Toast.LENGTH_SHORT).show() },
-                                    shape = RoundedCornerShape(8.dp),
-                                    color = Color(0xFF201F1F).copy(alpha = 0.6f),
-                                    modifier = Modifier.height(30.dp).width(360.dp)
-                                ) {
-                                    Row(
-                                        modifier = Modifier
-                                            .fillMaxSize()
-                                            .background(Color(0xFF7B2BFF).copy(alpha = 0.15f))
-                                            .padding(horizontal = 8.dp),
-                                        verticalAlignment = Alignment.CenterVertically
-                                    ) {
-                                        Icon(Icons.Default.PhotoLibrary, contentDescription = null, tint = Color(0xFFD1BCFF), modifier = Modifier.size(12.dp))
-                                        Spacer(modifier = Modifier.width(6.dp))
-                                        Text("AI B-ROLL • ${currentProject.bRollItems.size} Cutaways", color = Color(0xFFD1BCFF), fontSize = 8.5.sp, fontFamily = FontFamily.Monospace)
+                            // Track 4 Header: Kinetic Subtitles & Text
+                            Surface(
+                                onClick = { selectedTrackNum = 4; activeToolTab = VideoStudioToolTab.TEXT },
+                                color = if (selectedTrackNum == 4) Color(0xFFFFD166).copy(alpha = 0.25f) else Color(0xFF201B0B),
+                                border = if (selectedTrackNum == 4) BorderStroke(1.dp, Color(0xFFFFD166)) else null,
+                                shape = RoundedCornerShape(topStart = 4.dp, bottomStart = 4.dp),
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .height(38.dp)
+                                    .padding(start = 2.dp)
+                            ) {
+                                Column(modifier = Modifier.padding(4.dp), verticalArrangement = Arrangement.Center) {
+                                    Row(verticalAlignment = Alignment.CenterVertically) {
+                                        Icon(Icons.Default.Title, contentDescription = null, tint = Color(0xFFFFD166), modifier = Modifier.size(11.dp))
+                                        Spacer(modifier = Modifier.width(3.dp))
+                                        Text("Text", color = Color.White, fontSize = 9.sp, fontWeight = FontWeight.Bold)
                                     }
+                                    Text("Hormozi", color = Color(0xFFFFD166), fontSize = 7.sp, fontFamily = FontFamily.Monospace)
+                                }
+                            }
+
+                            // Track 5 Header: AI Voiceover (TTS)
+                            Surface(
+                                onClick = { selectedTrackNum = 5 },
+                                color = if (selectedTrackNum == 5) Color(0xFF00DAF3).copy(alpha = 0.25f) else Color(0xFF081B24),
+                                border = if (selectedTrackNum == 5) BorderStroke(1.dp, Color(0xFF00DAF3)) else null,
+                                shape = RoundedCornerShape(topStart = 4.dp, bottomStart = 4.dp),
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .height(40.dp)
+                                    .padding(start = 2.dp)
+                            ) {
+                                Column(modifier = Modifier.padding(4.dp), verticalArrangement = Arrangement.Center) {
+                                    Row(verticalAlignment = Alignment.CenterVertically) {
+                                        Icon(Icons.Default.Mic, contentDescription = null, tint = Color(0xFF00DAF3), modifier = Modifier.size(11.dp))
+                                        Spacer(modifier = Modifier.width(3.dp))
+                                        Text("Voice", color = Color.White, fontSize = 9.sp, fontWeight = FontWeight.Bold)
+                                    }
+                                    Text("Neural TTS", color = Color(0xFF00DAF3), fontSize = 7.sp, fontFamily = FontFamily.Monospace)
+                                }
+                            }
+
+                            // Track 6 Header: SFX & Background Music
+                            Surface(
+                                onClick = { selectedTrackNum = 6; activeToolTab = VideoStudioToolTab.AUDIO },
+                                color = if (selectedTrackNum == 6) Color(0xFFFF4D94).copy(alpha = 0.25f) else Color(0xFF220817),
+                                border = if (selectedTrackNum == 6) BorderStroke(1.dp, Color(0xFFFF4D94)) else null,
+                                shape = RoundedCornerShape(topStart = 4.dp, bottomStart = 4.dp),
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .height(40.dp)
+                                    .padding(start = 2.dp)
+                            ) {
+                                Column(modifier = Modifier.padding(4.dp), verticalArrangement = Arrangement.Center) {
+                                    Row(verticalAlignment = Alignment.CenterVertically) {
+                                        Icon(Icons.Default.GraphicEq, contentDescription = null, tint = Color(0xFFFF4D94), modifier = Modifier.size(11.dp))
+                                        Spacer(modifier = Modifier.width(3.dp))
+                                        Text("Audio", color = Color.White, fontSize = 9.sp, fontWeight = FontWeight.Bold)
+                                    }
+                                    Text("SFX / BGM", color = Color(0xFFFF4D94), fontSize = 7.sp, fontFamily = FontFamily.Monospace)
                                 }
                             }
                         }
 
-                        // Playhead Vertical Bar positioned dynamically based on time
-                        val playheadOffset = ((currentProject.currentPositionSeconds / currentProject.totalDurationSeconds.coerceAtLeast(1f)) * 260.dp.value).dp.coerceIn(10.dp, 300.dp)
+                        // Right Scrollable Lane Area with Pinch-to-Zoom and Vertical Scroll Sync
                         Box(
                             modifier = Modifier
+                                .weight(1f)
                                 .fillMaxHeight()
-                                .width(2.dp)
-                                .align(Alignment.CenterStart)
-                                .offset(x = playheadOffset)
-                                .background(Color(0xFF00DAF3))
+                                .verticalScroll(timelineVerticalScrollState)
                         ) {
                             Box(
                                 modifier = Modifier
-                                    .size(10.dp)
-                                    .clip(CircleShape)
-                                    .background(Color(0xFF00DAF3))
-                                    .align(Alignment.TopCenter)
-                            )
+                                    .width(timelineWidth)
+                                    .horizontalScroll(timelineHorizontalScrollState)
+                                    .pointerInput(Unit) {
+                                        detectTransformGestures { _, _, zoom, _ ->
+                                            timelineZoom = (timelineZoom * zoom).coerceIn(0.5f, 3.5f)
+                                        }
+                                    }
+                            ) {
+                                Column(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    verticalArrangement = Arrangement.spacedBy(4.dp)
+                                ) {
+                                    // 1. Dynamic Time Ruler (Seconds and tenths calculated with zoom)
+                                    Box(
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .height(24.dp)
+                                            .background(Color(0xFF0B0A10))
+                                            .pointerInput(Unit) {
+                                                detectTapGestures { offset ->
+                                                    val clickedSec = (offset.x / pixelsPerSecond.value).coerceIn(0f, safeTotalSeconds)
+                                                    currentProject = currentProject.copy(currentPositionSeconds = calculateSnappedPosition(clickedSec))
+                                                }
+                                            }
+                                    ) {
+                                        // Draw dynamic tick marks
+                                        val majorInterval = when {
+                                            timelineZoom >= 2.0f -> 0.5f
+                                            timelineZoom >= 1.0f -> 1.0f
+                                            else -> 2.0f
+                                        }
+                                        val count = (safeTotalSeconds / majorInterval).toInt() + 1
+                                        for (i in 0 until count) {
+                                            val sec = i * majorInterval
+                                            val xOffset = (sec * pixelsPerSecond.value).dp
+                                            Box(
+                                                modifier = Modifier
+                                                    .offset(x = xOffset)
+                                                    .width(1.dp)
+                                                    .height(8.dp)
+                                                    .background(Color(0x60FFFFFF))
+                                                    .align(Alignment.BottomStart)
+                                            )
+                                            Text(
+                                                text = formatExactTimestamp(sec),
+                                                color = Color(0xFF888496),
+                                                fontSize = 8.sp,
+                                                fontFamily = FontFamily.Monospace,
+                                                modifier = Modifier
+                                                    .offset(x = xOffset + 3.dp, y = 2.dp)
+                                                    .align(Alignment.TopStart)
+                                            )
+                                        }
+                                    }
+
+                                    // Track 1 Lane: Code Animations (HTML5/CSS3/GSAP Motion Graphics)
+                                    val codeTracks = currentProject.getResolvedCodeTracks()
+                                    Box(
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .height(44.dp)
+                                            .background(Color(0x1500F5A0))
+                                            .pointerInput(Unit) {
+                                                detectTapGestures { offset ->
+                                                    val clickedSec = (offset.x / pixelsPerSecond.value).coerceIn(0f, safeTotalSeconds)
+                                                    currentProject = currentProject.copy(currentPositionSeconds = calculateSnappedPosition(clickedSec))
+                                                }
+                                            }
+                                    ) {
+                                        codeTracks.forEach { item ->
+                                            val isCardSelected = selectedTrackNum == 1 && selectedCardId == item.id
+                                            val cardX = (item.startSeconds * pixelsPerSecond.value).dp
+                                            val cardW = (item.durationSeconds * pixelsPerSecond.value).dp.coerceAtLeast(60.dp)
+
+                                            Box(
+                                                modifier = Modifier
+                                                    .offset(x = cardX)
+                                                    .width(cardW)
+                                                    .fillMaxHeight()
+                                            ) {
+                                                Surface(
+                                                    onClick = {
+                                                        selectedTrackNum = 1
+                                                        selectedCardId = item.id
+                                                        currentProject = currentProject.copy(currentPositionSeconds = item.startSeconds)
+                                                        activeToolTab = VideoStudioToolTab.TUNE
+                                                    },
+                                                    shape = RoundedCornerShape(6.dp),
+                                                    color = Color(0xFF065F46),
+                                                    border = if (isCardSelected) BorderStroke(2.dp, Color(0xFF00F5A0)) else BorderStroke(0.5.dp, Color(0x6000F5A0)),
+                                                    shadowElevation = if (isCardSelected) 6.dp else 1.dp,
+                                                    modifier = Modifier.fillMaxSize()
+                                                ) {
+                                                    Row(modifier = Modifier.fillMaxSize()) {
+                                                        Box(modifier = Modifier.width(3.dp).fillMaxHeight().background(Color(0xFF00F5A0)))
+                                                        Column(modifier = Modifier.padding(horizontal = 4.dp, vertical = 2.dp), verticalArrangement = Arrangement.SpaceBetween) {
+                                                            Text(item.title, color = Color.White, fontSize = 8.5.sp, fontWeight = FontWeight.Bold, maxLines = 1)
+                                                            Text("${item.animationType} · ${"%.1f".format(item.durationSeconds)}s", color = Color(0xFF6EE7B7), fontSize = 7.5.sp, fontFamily = FontFamily.Monospace)
+                                                        }
+                                                    }
+                                                }
+                                                // Trim Handles (Left & Right)
+                                                if (isCardSelected) {
+                                                    Box(
+                                                        modifier = Modifier
+                                                            .align(Alignment.CenterStart)
+                                                            .width(10.dp)
+                                                            .fillMaxHeight()
+                                                            .background(Color.White.copy(alpha = 0.9f), RoundedCornerShape(topStart = 6.dp, bottomStart = 6.dp))
+                                                            .pointerInput(item.id) {
+                                                                detectDragGestures { change, dragAmount ->
+                                                                    change.consume()
+                                                                    val deltaSec = dragAmount.x / pixelsPerSecond.value
+                                                                    val newStart = (item.startSeconds + deltaSec).coerceAtLeast(0f)
+                                                                    val newDur = (item.durationSeconds - deltaSec).coerceAtLeast(0.3f)
+                                                                    val updated = currentProject.getResolvedCodeTracks().toMutableList()
+                                                                    val idx = updated.indexOfFirst { it.id == item.id }
+                                                                    if (idx != -1) {
+                                                                        updated[idx] = item.copy(startSeconds = newStart, durationSeconds = newDur)
+                                                                        currentProject = currentProject.copy(codeTracks = updated)
+                                                                    }
+                                                                }
+                                                            },
+                                                        contentAlignment = Alignment.Center
+                                                    ) {
+                                                        Box(modifier = Modifier.width(1.5.dp).height(12.dp).background(Color.Black))
+                                                    }
+                                                    Box(
+                                                        modifier = Modifier
+                                                            .align(Alignment.CenterEnd)
+                                                            .width(10.dp)
+                                                            .fillMaxHeight()
+                                                            .background(Color.White.copy(alpha = 0.9f), RoundedCornerShape(topEnd = 6.dp, bottomEnd = 6.dp))
+                                                            .pointerInput(item.id) {
+                                                                detectDragGestures { change, dragAmount ->
+                                                                    change.consume()
+                                                                    val deltaSec = dragAmount.x / pixelsPerSecond.value
+                                                                    val newDur = (item.durationSeconds + deltaSec).coerceAtLeast(0.3f)
+                                                                    val updated = currentProject.getResolvedCodeTracks().toMutableList()
+                                                                    val idx = updated.indexOfFirst { it.id == item.id }
+                                                                    if (idx != -1) {
+                                                                        updated[idx] = item.copy(durationSeconds = newDur)
+                                                                        currentProject = currentProject.copy(codeTracks = updated)
+                                                                    }
+                                                                }
+                                                            },
+                                                        contentAlignment = Alignment.Center
+                                                    ) {
+                                                        Box(modifier = Modifier.width(1.5.dp).height(12.dp).background(Color.Black))
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+
+                                    // Track 2 Lane: Video / B-Roll Clips
+                                    Box(
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .height(50.dp)
+                                            .background(Color(0x157B2BFF))
+                                            .pointerInput(Unit) {
+                                                detectTapGestures { offset ->
+                                                    val clickedSec = (offset.x / pixelsPerSecond.value).coerceIn(0f, safeTotalSeconds)
+                                                    currentProject = currentProject.copy(currentPositionSeconds = calculateSnappedPosition(clickedSec))
+                                                }
+                                            }
+                                    ) {
+                                        var clipAccumSec = 0f
+                                        currentProject.clips.forEachIndexed { index, clip ->
+                                            val isClipSelected = selectedTrackNum == 2 && currentProject.selectedClipIndex == index
+                                            val clipX = (clipAccumSec * pixelsPerSecond.value).dp
+                                            val clipW = (clip.durationSeconds * pixelsPerSecond.value).dp.coerceAtLeast(60.dp)
+                                            val startOfClip = clipAccumSec
+
+                                            Box(
+                                                modifier = Modifier
+                                                    .offset(x = clipX)
+                                                    .width(clipW)
+                                                    .fillMaxHeight()
+                                            ) {
+                                                Surface(
+                                                    onClick = {
+                                                        selectedTrackNum = 2
+                                                        selectedCardId = clip.id
+                                                        currentProject = currentProject.copy(selectedClipIndex = index, currentPositionSeconds = startOfClip)
+                                                        activeToolTab = VideoStudioToolTab.TUNE
+                                                    },
+                                                    shape = RoundedCornerShape(6.dp),
+                                                    color = Color(0xFF581C87),
+                                                    border = if (isClipSelected) BorderStroke(2.dp, Color(0xFF00DAF3)) else BorderStroke(0.5.dp, Color(0x60C084FC)),
+                                                    shadowElevation = if (isClipSelected) 6.dp else 1.dp,
+                                                    modifier = Modifier.fillMaxSize()
+                                                ) {
+                                                    Row(modifier = Modifier.fillMaxSize()) {
+                                                        Box(modifier = Modifier.width(3.dp).fillMaxHeight().background(Color(0xFFC084FC)))
+                                                        Column(modifier = Modifier.padding(horizontal = 4.dp, vertical = 3.dp), verticalArrangement = Arrangement.SpaceBetween) {
+                                                            Row(
+                                                                modifier = Modifier.fillMaxWidth(),
+                                                                horizontalArrangement = Arrangement.SpaceBetween,
+                                                                verticalAlignment = Alignment.CenterVertically
+                                                            ) {
+                                                                Text(clip.name, color = Color.White, fontSize = 8.5.sp, fontWeight = FontWeight.Bold, maxLines = 1, modifier = Modifier.weight(1f))
+                                                                if (clip.name.contains("_cut") || clip.name.contains("_part")) {
+                                                                    Text("✂️", fontSize = 8.sp)
+                                                                }
+                                                            }
+                                                            Text("Speed ${clip.speed}x · ${"%.1f".format(clip.durationSeconds)}s", color = Color(0xFFE9D5FF), fontSize = 7.5.sp, fontFamily = FontFamily.Monospace)
+                                                        }
+                                                    }
+                                                }
+                                                // Trim Handles (Left & Right) for Video Clip
+                                                if (isClipSelected) {
+                                                    Box(
+                                                        modifier = Modifier
+                                                            .align(Alignment.CenterStart)
+                                                            .width(10.dp)
+                                                            .fillMaxHeight()
+                                                            .background(Color.White.copy(alpha = 0.9f), RoundedCornerShape(topStart = 6.dp, bottomStart = 6.dp))
+                                                            .pointerInput(clip.id) {
+                                                                detectDragGestures { change, dragAmount ->
+                                                                    change.consume()
+                                                                    val deltaSec = dragAmount.x / pixelsPerSecond.value
+                                                                    val newIn = (clip.inSeconds + deltaSec).coerceAtLeast(0f)
+                                                                    val newDur = (clip.durationSeconds - deltaSec).coerceAtLeast(0.3f)
+                                                                    val updated = currentProject.clips.toMutableList()
+                                                                    updated[index] = clip.copy(inSeconds = newIn, durationSeconds = newDur)
+                                                                    val newTotal = updated.sumOf { it.durationSeconds.toDouble() }.toFloat()
+                                                                    currentProject = currentProject.copy(clips = updated, totalDurationSeconds = newTotal)
+                                                                }
+                                                            },
+                                                        contentAlignment = Alignment.Center
+                                                    ) {
+                                                        Box(modifier = Modifier.width(1.5.dp).height(14.dp).background(Color.Black))
+                                                    }
+                                                    Box(
+                                                        modifier = Modifier
+                                                            .align(Alignment.CenterEnd)
+                                                            .width(10.dp)
+                                                            .fillMaxHeight()
+                                                            .background(Color.White.copy(alpha = 0.9f), RoundedCornerShape(topEnd = 6.dp, bottomEnd = 6.dp))
+                                                            .pointerInput(clip.id) {
+                                                                detectDragGestures { change, dragAmount ->
+                                                                    change.consume()
+                                                                    val deltaSec = dragAmount.x / pixelsPerSecond.value
+                                                                    val newDur = (clip.durationSeconds + deltaSec).coerceAtLeast(0.3f)
+                                                                    val updated = currentProject.clips.toMutableList()
+                                                                    updated[index] = clip.copy(durationSeconds = newDur)
+                                                                    val newTotal = updated.sumOf { it.durationSeconds.toDouble() }.toFloat()
+                                                                    currentProject = currentProject.copy(clips = updated, totalDurationSeconds = newTotal)
+                                                                }
+                                                            },
+                                                        contentAlignment = Alignment.Center
+                                                    ) {
+                                                        Box(modifier = Modifier.width(1.5.dp).height(14.dp).background(Color.Black))
+                                                    }
+                                                }
+                                            }
+                                            clipAccumSec += clip.durationSeconds
+                                        }
+
+                                        // + Add Media from phone gallery button
+                                        Surface(
+                                            onClick = {
+                                                addMoreMediaLauncher.launch(
+                                                    PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageAndVideo)
+                                                )
+                                            },
+                                            shape = RoundedCornerShape(6.dp),
+                                            color = Color(0xFF261D3A),
+                                            border = BorderStroke(1.dp, Color(0x507B2BFF)),
+                                            modifier = Modifier
+                                                .offset(x = (clipAccumSec * pixelsPerSecond.value).dp + 6.dp)
+                                                .size(width = 38.dp, height = 48.dp)
+                                        ) {
+                                            Box(contentAlignment = Alignment.Center) {
+                                                Icon(Icons.Default.Add, contentDescription = "Add Media", tint = Color.White, modifier = Modifier.size(16.dp))
+                                            }
+                                        }
+                                    }
+
+                                    // Track 3 Lane: Visual Assets / Overlays / Stickers (Telegram & Local Images)
+                                    val assetTracks = currentProject.getResolvedVisualAssets()
+                                    Box(
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .height(40.dp)
+                                            .background(Color(0x15FF9F1C))
+                                            .pointerInput(Unit) {
+                                                detectTapGestures { offset ->
+                                                    val clickedSec = (offset.x / pixelsPerSecond.value).coerceIn(0f, safeTotalSeconds)
+                                                    currentProject = currentProject.copy(currentPositionSeconds = calculateSnappedPosition(clickedSec))
+                                                }
+                                            }
+                                    ) {
+                                        assetTracks.forEach { item ->
+                                            val isCardSelected = selectedTrackNum == 3 && selectedCardId == item.id
+                                            val cardX = (item.startSeconds * pixelsPerSecond.value).dp
+                                            val cardW = (item.durationSeconds * pixelsPerSecond.value).dp.coerceAtLeast(60.dp)
+
+                                            Box(
+                                                modifier = Modifier
+                                                    .offset(x = cardX)
+                                                    .width(cardW)
+                                                    .fillMaxHeight()
+                                            ) {
+                                                Surface(
+                                                    onClick = {
+                                                        selectedTrackNum = 3
+                                                        selectedCardId = item.id
+                                                        currentProject = currentProject.copy(currentPositionSeconds = item.startSeconds)
+                                                        activeToolTab = VideoStudioToolTab.TUNE
+                                                    },
+                                                    shape = RoundedCornerShape(6.dp),
+                                                    color = Color(0xFF78350F),
+                                                    border = if (isCardSelected) BorderStroke(2.dp, Color(0xFFFFB703)) else BorderStroke(0.5.dp, Color(0x60FFB703)),
+                                                    shadowElevation = if (isCardSelected) 6.dp else 1.dp,
+                                                    modifier = Modifier.fillMaxSize()
+                                                ) {
+                                                    Row(modifier = Modifier.fillMaxSize()) {
+                                                        Box(modifier = Modifier.width(3.dp).fillMaxHeight().background(Color(0xFFFBBF24)))
+                                                        Column(modifier = Modifier.padding(horizontal = 4.dp, vertical = 2.dp), verticalArrangement = Arrangement.SpaceBetween) {
+                                                            Text(item.name, color = Color.White, fontSize = 8.5.sp, fontWeight = FontWeight.Bold, maxLines = 1)
+                                                            Text("Sticker · ${"%.1f".format(item.durationSeconds)}s", color = Color(0xFFFDE68A), fontSize = 7.5.sp, fontFamily = FontFamily.Monospace)
+                                                        }
+                                                    }
+                                                }
+                                                // Trim Handles (Left & Right)
+                                                if (isCardSelected) {
+                                                    Box(
+                                                        modifier = Modifier
+                                                            .align(Alignment.CenterStart)
+                                                            .width(10.dp)
+                                                            .fillMaxHeight()
+                                                            .background(Color.White.copy(alpha = 0.9f), RoundedCornerShape(topStart = 6.dp, bottomStart = 6.dp))
+                                                            .pointerInput(item.id) {
+                                                                detectDragGestures { change, dragAmount ->
+                                                                    change.consume()
+                                                                    val deltaSec = dragAmount.x / pixelsPerSecond.value
+                                                                    val newStart = (item.startSeconds + deltaSec).coerceAtLeast(0f)
+                                                                    val newDur = (item.durationSeconds - deltaSec).coerceAtLeast(0.3f)
+                                                                    val updated = currentProject.getResolvedVisualAssets().toMutableList()
+                                                                    val idx = updated.indexOfFirst { it.id == item.id }
+                                                                    if (idx != -1) {
+                                                                        updated[idx] = item.copy(startSeconds = newStart, durationSeconds = newDur)
+                                                                        currentProject = currentProject.copy(visualAssetTracks = updated)
+                                                                    }
+                                                                }
+                                                            },
+                                                        contentAlignment = Alignment.Center
+                                                    ) {
+                                                        Box(modifier = Modifier.width(1.5.dp).height(12.dp).background(Color.Black))
+                                                    }
+                                                    Box(
+                                                        modifier = Modifier
+                                                            .align(Alignment.CenterEnd)
+                                                            .width(10.dp)
+                                                            .fillMaxHeight()
+                                                            .background(Color.White.copy(alpha = 0.9f), RoundedCornerShape(topEnd = 6.dp, bottomEnd = 6.dp))
+                                                            .pointerInput(item.id) {
+                                                                detectDragGestures { change, dragAmount ->
+                                                                    change.consume()
+                                                                    val deltaSec = dragAmount.x / pixelsPerSecond.value
+                                                                    val newDur = (item.durationSeconds + deltaSec).coerceAtLeast(0.3f)
+                                                                    val updated = currentProject.getResolvedVisualAssets().toMutableList()
+                                                                    val idx = updated.indexOfFirst { it.id == item.id }
+                                                                    if (idx != -1) {
+                                                                        updated[idx] = item.copy(durationSeconds = newDur)
+                                                                        currentProject = currentProject.copy(visualAssetTracks = updated)
+                                                                    }
+                                                                }
+                                                            },
+                                                        contentAlignment = Alignment.Center
+                                                    ) {
+                                                        Box(modifier = Modifier.width(1.5.dp).height(12.dp).background(Color.Black))
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+
+                                    // Track 4 Lane: Text & Kinetic Subtitles
+                                    val textTracks = currentProject.getResolvedTextSubtitles()
+                                    Box(
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .height(38.dp)
+                                            .background(Color(0x15FFD166))
+                                            .pointerInput(Unit) {
+                                                detectTapGestures { offset ->
+                                                    val clickedSec = (offset.x / pixelsPerSecond.value).coerceIn(0f, safeTotalSeconds)
+                                                    currentProject = currentProject.copy(currentPositionSeconds = calculateSnappedPosition(clickedSec))
+                                                }
+                                            }
+                                    ) {
+                                        textTracks.forEach { item ->
+                                            val isCardSelected = selectedTrackNum == 4 && selectedCardId == item.id
+                                            val cardX = (item.startSeconds * pixelsPerSecond.value).dp
+                                            val cardW = (item.durationSeconds * pixelsPerSecond.value).dp.coerceAtLeast(60.dp)
+
+                                            Box(
+                                                modifier = Modifier
+                                                    .offset(x = cardX)
+                                                    .width(cardW)
+                                                    .fillMaxHeight()
+                                            ) {
+                                                Surface(
+                                                    onClick = {
+                                                        selectedTrackNum = 4
+                                                        selectedCardId = item.id
+                                                        currentProject = currentProject.copy(currentPositionSeconds = item.startSeconds)
+                                                        activeToolTab = VideoStudioToolTab.TUNE
+                                                    },
+                                                    shape = RoundedCornerShape(6.dp),
+                                                    color = Color(0xFF713F12),
+                                                    border = if (isCardSelected) BorderStroke(2.dp, Color(0xFFFFD166)) else BorderStroke(0.5.dp, Color(0x60FFD166)),
+                                                    shadowElevation = if (isCardSelected) 6.dp else 1.dp,
+                                                    modifier = Modifier.fillMaxSize()
+                                                ) {
+                                                    Row(modifier = Modifier.fillMaxSize()) {
+                                                        Box(modifier = Modifier.width(3.dp).fillMaxHeight().background(Color(0xFFFFD166)))
+                                                        Column(modifier = Modifier.padding(horizontal = 4.dp, vertical = 2.dp), verticalArrangement = Arrangement.SpaceBetween) {
+                                                            Text(item.text, color = Color.White, fontSize = 8.5.sp, fontWeight = FontWeight.Bold, maxLines = 1)
+                                                            Text("${item.style} · ${"%.1f".format(item.durationSeconds)}s", color = Color(0xFFFEF08A), fontSize = 7.5.sp, fontFamily = FontFamily.Monospace)
+                                                        }
+                                                    }
+                                                }
+                                                // Trim Handles (Left & Right)
+                                                if (isCardSelected) {
+                                                    Box(
+                                                        modifier = Modifier
+                                                            .align(Alignment.CenterStart)
+                                                            .width(10.dp)
+                                                            .fillMaxHeight()
+                                                            .background(Color.White.copy(alpha = 0.9f), RoundedCornerShape(topStart = 6.dp, bottomStart = 6.dp))
+                                                            .pointerInput(item.id) {
+                                                                detectDragGestures { change, dragAmount ->
+                                                                    change.consume()
+                                                                    val deltaSec = dragAmount.x / pixelsPerSecond.value
+                                                                    val newStart = (item.startSeconds + deltaSec).coerceAtLeast(0f)
+                                                                    val newDur = (item.durationSeconds - deltaSec).coerceAtLeast(0.3f)
+                                                                    val updated = currentProject.getResolvedTextSubtitles().toMutableList()
+                                                                    val idx = updated.indexOfFirst { it.id == item.id }
+                                                                    if (idx != -1) {
+                                                                        updated[idx] = item.copy(startSeconds = newStart, durationSeconds = newDur)
+                                                                        currentProject = currentProject.copy(textSubtitleTracks = updated)
+                                                                    }
+                                                                }
+                                                            },
+                                                        contentAlignment = Alignment.Center
+                                                    ) {
+                                                        Box(modifier = Modifier.width(1.5.dp).height(12.dp).background(Color.Black))
+                                                    }
+                                                    Box(
+                                                        modifier = Modifier
+                                                            .align(Alignment.CenterEnd)
+                                                            .width(10.dp)
+                                                            .fillMaxHeight()
+                                                            .background(Color.White.copy(alpha = 0.9f), RoundedCornerShape(topEnd = 6.dp, bottomEnd = 6.dp))
+                                                            .pointerInput(item.id) {
+                                                                detectDragGestures { change, dragAmount ->
+                                                                    change.consume()
+                                                                    val deltaSec = dragAmount.x / pixelsPerSecond.value
+                                                                    val newDur = (item.durationSeconds + deltaSec).coerceAtLeast(0.3f)
+                                                                    val updated = currentProject.getResolvedTextSubtitles().toMutableList()
+                                                                    val idx = updated.indexOfFirst { it.id == item.id }
+                                                                    if (idx != -1) {
+                                                                        updated[idx] = item.copy(durationSeconds = newDur)
+                                                                        currentProject = currentProject.copy(textSubtitleTracks = updated)
+                                                                    }
+                                                                }
+                                                            },
+                                                        contentAlignment = Alignment.Center
+                                                    ) {
+                                                        Box(modifier = Modifier.width(1.5.dp).height(12.dp).background(Color.Black))
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+
+                                    // Track 5 Lane: AI Voiceover (TTS)
+                                    val voiceTracks = currentProject.getResolvedVoiceoverTracks()
+                                    Box(
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .height(40.dp)
+                                            .background(Color(0x1500DAF3))
+                                            .pointerInput(Unit) {
+                                                detectTapGestures { offset ->
+                                                    val clickedSec = (offset.x / pixelsPerSecond.value).coerceIn(0f, safeTotalSeconds)
+                                                    currentProject = currentProject.copy(currentPositionSeconds = calculateSnappedPosition(clickedSec))
+                                                }
+                                            }
+                                    ) {
+                                        voiceTracks.forEach { item ->
+                                            val isCardSelected = selectedTrackNum == 5 && selectedCardId == item.id
+                                            val cardX = (item.startSeconds * pixelsPerSecond.value).dp
+                                            val cardW = (item.durationSeconds * pixelsPerSecond.value).dp.coerceAtLeast(60.dp)
+
+                                            Box(
+                                                modifier = Modifier
+                                                    .offset(x = cardX)
+                                                    .width(cardW)
+                                                    .fillMaxHeight()
+                                            ) {
+                                                Surface(
+                                                    onClick = {
+                                                        selectedTrackNum = 5
+                                                        selectedCardId = item.id
+                                                        currentProject = currentProject.copy(currentPositionSeconds = item.startSeconds)
+                                                        activeToolTab = VideoStudioToolTab.TUNE
+                                                        com.example.utils.TTSManager.init(context)
+                                                        com.example.utils.TTSManager.speak(item.narration, context)
+                                                    },
+                                                    shape = RoundedCornerShape(6.dp),
+                                                    color = Color(0xFF075985),
+                                                    border = if (isCardSelected) BorderStroke(2.dp, Color(0xFF00DAF3)) else BorderStroke(0.5.dp, Color(0x6000DAF3)),
+                                                    shadowElevation = if (isCardSelected) 6.dp else 1.dp,
+                                                    modifier = Modifier.fillMaxSize()
+                                                ) {
+                                                    Row(modifier = Modifier.fillMaxSize()) {
+                                                        Box(modifier = Modifier.width(3.dp).fillMaxHeight().background(Color(0xFF00DAF3)))
+                                                        Column(modifier = Modifier.padding(horizontal = 4.dp, vertical = 2.dp), verticalArrangement = Arrangement.SpaceBetween) {
+                                                            Text(item.narration.take(24) + if (item.narration.length > 24) "..." else "", color = Color.White, fontSize = 8.5.sp, fontWeight = FontWeight.Bold, maxLines = 1)
+                                                            Text("TTS · ${item.speakerTone} · ${"%.1f".format(item.durationSeconds)}s", color = Color(0xFFBAE6FD), fontSize = 7.5.sp, fontFamily = FontFamily.Monospace)
+                                                        }
+                                                    }
+                                                }
+                                                // Trim Handles (Left & Right)
+                                                if (isCardSelected) {
+                                                    Box(
+                                                        modifier = Modifier
+                                                            .align(Alignment.CenterStart)
+                                                            .width(10.dp)
+                                                            .fillMaxHeight()
+                                                            .background(Color.White.copy(alpha = 0.9f), RoundedCornerShape(topStart = 6.dp, bottomStart = 6.dp))
+                                                            .pointerInput(item.id) {
+                                                                detectDragGestures { change, dragAmount ->
+                                                                    change.consume()
+                                                                    val deltaSec = dragAmount.x / pixelsPerSecond.value
+                                                                    val newStart = (item.startSeconds + deltaSec).coerceAtLeast(0f)
+                                                                    val newDur = (item.durationSeconds - deltaSec).coerceAtLeast(0.3f)
+                                                                    val updated = currentProject.getResolvedVoiceoverTracks().toMutableList()
+                                                                    val idx = updated.indexOfFirst { it.id == item.id }
+                                                                    if (idx != -1) {
+                                                                        updated[idx] = item.copy(startSeconds = newStart, durationSeconds = newDur)
+                                                                        currentProject = currentProject.copy(voiceoverTracks = updated)
+                                                                    }
+                                                                }
+                                                            },
+                                                        contentAlignment = Alignment.Center
+                                                    ) {
+                                                        Box(modifier = Modifier.width(1.5.dp).height(12.dp).background(Color.Black))
+                                                    }
+                                                    Box(
+                                                        modifier = Modifier
+                                                            .align(Alignment.CenterEnd)
+                                                            .width(10.dp)
+                                                            .fillMaxHeight()
+                                                            .background(Color.White.copy(alpha = 0.9f), RoundedCornerShape(topEnd = 6.dp, bottomEnd = 6.dp))
+                                                            .pointerInput(item.id) {
+                                                                detectDragGestures { change, dragAmount ->
+                                                                    change.consume()
+                                                                    val deltaSec = dragAmount.x / pixelsPerSecond.value
+                                                                    val newDur = (item.durationSeconds + deltaSec).coerceAtLeast(0.3f)
+                                                                    val updated = currentProject.getResolvedVoiceoverTracks().toMutableList()
+                                                                    val idx = updated.indexOfFirst { it.id == item.id }
+                                                                    if (idx != -1) {
+                                                                        updated[idx] = item.copy(durationSeconds = newDur)
+                                                                        currentProject = currentProject.copy(voiceoverTracks = updated)
+                                                                    }
+                                                                }
+                                                            },
+                                                        contentAlignment = Alignment.Center
+                                                    ) {
+                                                        Box(modifier = Modifier.width(1.5.dp).height(12.dp).background(Color.Black))
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+
+                                    // Track 6 Lane: Sound Effects (SFX) & Background Music (BGM)
+                                    val soundTracks = currentProject.getResolvedSoundAudioTracks()
+                                    Box(
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .height(40.dp)
+                                            .background(Color(0x15FF4D94))
+                                            .pointerInput(Unit) {
+                                                detectTapGestures { offset ->
+                                                    val clickedSec = (offset.x / pixelsPerSecond.value).coerceIn(0f, safeTotalSeconds)
+                                                    currentProject = currentProject.copy(currentPositionSeconds = calculateSnappedPosition(clickedSec))
+                                                }
+                                            }
+                                    ) {
+                                        soundTracks.forEach { item ->
+                                            val isCardSelected = selectedTrackNum == 6 && selectedCardId == item.id
+                                            val cardX = (item.startSeconds * pixelsPerSecond.value).dp
+                                            val cardW = (item.durationSeconds * pixelsPerSecond.value).dp.coerceAtLeast(60.dp)
+
+                                            Box(
+                                                modifier = Modifier
+                                                    .offset(x = cardX)
+                                                    .width(cardW)
+                                                    .fillMaxHeight()
+                                            ) {
+                                                Surface(
+                                                    onClick = {
+                                                        selectedTrackNum = 6
+                                                        selectedCardId = item.id
+                                                        currentProject = currentProject.copy(currentPositionSeconds = item.startSeconds)
+                                                        activeToolTab = VideoStudioToolTab.TUNE
+                                                    },
+                                                    shape = RoundedCornerShape(6.dp),
+                                                    color = if (item.isSfx) Color(0xFF831843) else Color(0xFF4C0519),
+                                                    border = if (isCardSelected) BorderStroke(2.dp, Color(0xFFFF4D94)) else BorderStroke(0.5.dp, Color(0x60FF4D94)),
+                                                    shadowElevation = if (isCardSelected) 6.dp else 1.dp,
+                                                    modifier = Modifier.fillMaxSize()
+                                                ) {
+                                                    Row(modifier = Modifier.fillMaxSize()) {
+                                                        Box(modifier = Modifier.width(3.dp).fillMaxHeight().background(Color(0xFFFF4D94)))
+                                                        Column(modifier = Modifier.padding(horizontal = 4.dp, vertical = 2.dp), verticalArrangement = Arrangement.SpaceBetween) {
+                                                            Text(item.title, color = Color.White, fontSize = 8.5.sp, fontWeight = FontWeight.Bold, maxLines = 1)
+                                                            Text("${if (item.isSfx) "SFX" else "BGM"} · Vol ${(item.volume * 100).toInt()}% · ${"%.1f".format(item.durationSeconds)}s", color = Color(0xFFFBCFE8), fontSize = 7.5.sp, fontFamily = FontFamily.Monospace)
+                                                        }
+                                                    }
+                                                }
+                                                // Trim Handles (Left & Right)
+                                                if (isCardSelected) {
+                                                    Box(
+                                                        modifier = Modifier
+                                                            .align(Alignment.CenterStart)
+                                                            .width(10.dp)
+                                                            .fillMaxHeight()
+                                                            .background(Color.White.copy(alpha = 0.9f), RoundedCornerShape(topStart = 6.dp, bottomStart = 6.dp))
+                                                            .pointerInput(item.id) {
+                                                                detectDragGestures { change, dragAmount ->
+                                                                    change.consume()
+                                                                    val deltaSec = dragAmount.x / pixelsPerSecond.value
+                                                                    val newStart = (item.startSeconds + deltaSec).coerceAtLeast(0f)
+                                                                    val newDur = (item.durationSeconds - deltaSec).coerceAtLeast(0.3f)
+                                                                    val updated = currentProject.getResolvedSoundAudioTracks().toMutableList()
+                                                                    val idx = updated.indexOfFirst { it.id == item.id }
+                                                                    if (idx != -1) {
+                                                                        updated[idx] = item.copy(startSeconds = newStart, durationSeconds = newDur)
+                                                                        currentProject = currentProject.copy(soundAudioTracks = updated)
+                                                                    }
+                                                                }
+                                                            },
+                                                        contentAlignment = Alignment.Center
+                                                    ) {
+                                                        Box(modifier = Modifier.width(1.5.dp).height(12.dp).background(Color.Black))
+                                                    }
+                                                    Box(
+                                                        modifier = Modifier
+                                                            .align(Alignment.CenterEnd)
+                                                            .width(10.dp)
+                                                            .fillMaxHeight()
+                                                            .background(Color.White.copy(alpha = 0.9f), RoundedCornerShape(topEnd = 6.dp, bottomEnd = 6.dp))
+                                                            .pointerInput(item.id) {
+                                                                detectDragGestures { change, dragAmount ->
+                                                                    change.consume()
+                                                                    val deltaSec = dragAmount.x / pixelsPerSecond.value
+                                                                    val newDur = (item.durationSeconds + deltaSec).coerceAtLeast(0.3f)
+                                                                    val updated = currentProject.getResolvedSoundAudioTracks().toMutableList()
+                                                                    val idx = updated.indexOfFirst { it.id == item.id }
+                                                                    if (idx != -1) {
+                                                                        updated[idx] = item.copy(durationSeconds = newDur)
+                                                                        currentProject = currentProject.copy(soundAudioTracks = updated)
+                                                                    }
+                                                                }
+                                                            },
+                                                        contentAlignment = Alignment.Center
+                                                    ) {
+                                                        Box(modifier = Modifier.width(1.5.dp).height(12.dp).background(Color.Black))
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+
+                                // Draggable Playhead Needle with Magnetic Snapping
+                                val playheadX = (currentProject.currentPositionSeconds * pixelsPerSecond.value).dp
+                                Box(
+                                    modifier = Modifier
+                                        .fillMaxHeight()
+                                        .width(2.dp)
+                                        .offset(x = playheadX)
+                                        .background(Color(0xFF00DAF3))
+                                        .pointerInput(Unit) {
+                                            detectDragGestures(
+                                                onDrag = { change, dragAmount ->
+                                                    change.consume()
+                                                    val deltaSec = dragAmount.x / pixelsPerSecond.value
+                                                    val rawSec = (currentProject.currentPositionSeconds + deltaSec).coerceIn(0f, safeTotalSeconds)
+                                                    currentProject = currentProject.copy(currentPositionSeconds = calculateSnappedPosition(rawSec))
+                                                }
+                                            )
+                                        }
+                                ) {
+                                    // Scrubber Needle Handle Head
+                                    Surface(
+                                        shape = RoundedCornerShape(topStart = 0.dp, topEnd = 0.dp, bottomStart = 4.dp, bottomEnd = 4.dp),
+                                        color = Color(0xFF00DAF3),
+                                        shadowElevation = 4.dp,
+                                        modifier = Modifier
+                                            .size(width = 10.dp, height = 12.dp)
+                                            .align(Alignment.TopCenter)
+                                            .offset(y = (-2).dp)
+                                    ) {}
+                                }
+                            }
                         }
                     }
                 }
@@ -1364,6 +2639,8 @@ fun VideoTimelineStudioScreen(
                 VideoStudioToolContainer(
                     activeTab = activeToolTab,
                     project = currentProject,
+                    selectedTrackNumber = selectedTrackNum,
+                    selectedCardId = selectedCardId,
                     onUpdateProject = { updated -> pushState(updated) },
                     onCloseTab = { activeToolTab = VideoStudioToolTab.NONE }
                 )
@@ -1384,6 +2661,7 @@ fun VideoTimelineStudioScreen(
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     val toolbarItems = listOf(
+                        Pair(VideoStudioToolTab.TUNE, Pair("Tune", Icons.Default.Tune)),
                         Pair(VideoStudioToolTab.EDIT, Pair("Edit", Icons.Default.ContentCut)),
                         Pair(VideoStudioToolTab.AUDIO, Pair("Audio", Icons.Default.MusicNote)),
                         Pair(VideoStudioToolTab.TEXT, Pair("Text", Icons.Default.Title)),
@@ -1462,6 +2740,33 @@ fun VideoTimelineStudioScreen(
             )
         }
 
+        // 3. AI Video Scene Generator interface (Level 3 Pro)
+        AnimatedVisibility(
+            visible = activeSubView == VideoStudioSubView.AI_VIDEO_GENERATOR,
+            enter = slideInVertically(initialOffsetY = { it }) + fadeIn(),
+            exit = slideOutVertically(targetOffsetY = { it }) + fadeOut()
+        ) {
+            VideoAiVideoGeneratorDialog(
+                project = currentProject,
+                onInsertClip = { newClip ->
+                    val updatedClips = currentProject.clips.toMutableList().apply { add(newClip) }
+                    val updated = currentProject.copy(
+                        clips = updatedClips,
+                        totalDurationSeconds = updatedClips.sumOf { it.durationSeconds.toDouble() }.toFloat()
+                    )
+                    pushState(updated)
+                    activeSubView = VideoStudioSubView.NONE
+                },
+                onInsertVisualAsset = { newAsset ->
+                    val updatedAssets = currentProject.getResolvedVisualAssets().toMutableList().apply { add(newAsset) }
+                    val updated = currentProject.copy(visualAssetTracks = updatedAssets)
+                    pushState(updated)
+                    activeSubView = VideoStudioSubView.NONE
+                },
+                onDismiss = { activeSubView = VideoStudioSubView.NONE }
+            )
+        }
+
         // 3. Fullscreen Player Dialog
         if (showFullscreenPlayer) {
             VideoFullscreenPlayerDialog(
@@ -1500,6 +2805,116 @@ fun VideoTimelineStudioScreen(
                     showSaifAiEditingModal = false
                 }
             )
+        }
+
+        // 5b. External AI Tools Modal (Auto-Cut, Auto-Captions, Auto-Duck, Auto-Reframe)
+        if (showAiToolsModal) {
+            ModalBottomSheet(
+                onDismissRequest = { showAiToolsModal = false },
+                containerColor = Color(0xFF100E17),
+                dragHandle = {
+                    Surface(
+                        modifier = Modifier.padding(vertical = 10.dp).width(44.dp).height(4.dp),
+                        shape = CircleShape,
+                        color = Color(0xFF00DAF3).copy(alpha = 0.5f)
+                    ) {}
+                }
+            ) {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 16.dp, vertical = 8.dp)
+                ) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Box(
+                                modifier = Modifier
+                                    .size(36.dp)
+                                    .clip(CircleShape)
+                                    .background(Color(0xFF7B2BFF).copy(alpha = 0.3f)),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Icon(Icons.Default.AutoFixHigh, contentDescription = null, tint = Color(0xFF00DAF3), modifier = Modifier.size(20.dp))
+                            }
+                            Spacer(modifier = Modifier.width(10.dp))
+                            Column {
+                                Text("AI STUDIO TOOLS", color = Color.White, fontSize = 15.sp, fontWeight = FontWeight.Bold)
+                                Text("Silence cuts, word captions, ducking & reframe", color = Color(0xFF9E95AC), fontSize = 11.sp)
+                            }
+                        }
+                        IconButton(onClick = { showAiToolsModal = false }) {
+                            Icon(Icons.Default.Close, contentDescription = "Close", tint = Color.White)
+                        }
+                    }
+
+                    Spacer(modifier = Modifier.height(14.dp))
+
+                    LazyColumn(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                        item {
+                            ProToolCard(
+                                title = "AI Auto-Cut (Silence Remover)",
+                                desc = "Scans waveform and ripple-deletes dead space (>1.2s).",
+                                icon = Icons.Default.ContentCut,
+                                badge = "RIPPLE CUT",
+                                onClick = {
+                                    val silence = SaifAiEditingEngine.detectSilenceSegments(currentProject.clips)
+                                    val updated = SaifAiEditingEngine.applySilenceAutoCut(currentProject, silence)
+                                    pushState(updated)
+                                    showAiToolsModal = false
+                                    Toast.makeText(context, "✂️ Removed silent pauses from timeline!", Toast.LENGTH_SHORT).show()
+                                }
+                            )
+                        }
+                        item {
+                            ProToolCard(
+                                title = "AI Auto-Captions (Speech-to-Text)",
+                                desc = "Generates word-level synchronized karaoke subtitles.",
+                                icon = Icons.Default.Subtitles,
+                                badge = "AUTO SUBTITLES",
+                                onClick = {
+                                    val captions = SaifAiEditingEngine.generateWordLevelAutoCaptions(currentProject)
+                                    val updated = currentProject.copy(autoCaptions = captions)
+                                    pushState(updated)
+                                    showAiToolsModal = false
+                                    Toast.makeText(context, "💬 Subtitle track generated!", Toast.LENGTH_SHORT).show()
+                                }
+                            )
+                        }
+                        item {
+                            ProToolCard(
+                                title = "Smart Audio Ducking (Auto-Duck)",
+                                desc = "Dips background music by 70% during voiceover segments.",
+                                icon = Icons.Default.VolumeDown,
+                                badge = "DSP DUCKING",
+                                onClick = {
+                                    val updated = SaifAiEditingEngine.applySmartAudioDucking(currentProject, 0.30f)
+                                    pushState(updated)
+                                    showAiToolsModal = false
+                                    Toast.makeText(context, "🎵 Smart audio-ducking applied!", Toast.LENGTH_SHORT).show()
+                                }
+                            )
+                        }
+                        item {
+                            ProToolCard(
+                                title = "AI Auto-Reframe (9:16 Shorts)",
+                                desc = "Instantly transforms aspect ratio to 9:16 portrait format.",
+                                icon = Icons.Default.CropRotate,
+                                badge = "9:16 REELS",
+                                onClick = {
+                                    val updated = SaifAiEditingEngine.applyAutoReframe(currentProject, "9:16")
+                                    pushState(updated)
+                                    showAiToolsModal = false
+                                    Toast.makeText(context, "📱 Reframed timeline to 9:16 Shorts!", Toast.LENGTH_SHORT).show()
+                                }
+                            )
+                        }
+                    }
+                }
+            }
         }
 
         // 6. Floating AI Prompt Video Director Dialog

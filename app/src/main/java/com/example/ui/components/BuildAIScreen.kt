@@ -229,11 +229,45 @@ fun BuildAIScreen(
         if (uri != null) attachedUris.add(uri)
     }
 
+    var showLiveBaatcheetChoiceDialog by remember { mutableStateOf(false) }
+
+    val mediaProjectionManager = remember {
+        context.getSystemService(Context.MEDIA_PROJECTION_SERVICE) as? android.media.projection.MediaProjectionManager
+    }
+
+    val screenCaptureLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.StartActivityForResult()
+    ) { result ->
+        if (result.resultCode == android.app.Activity.RESULT_OK && result.data != null && mediaProjectionManager != null) {
+            try {
+                com.example.LiveVoiceService.activeInstance?.elevateToMediaProjection()
+                val projection = mediaProjectionManager.getMediaProjection(result.resultCode, result.data!!)
+                val metrics = context.resources.displayMetrics
+                if (projection != null) {
+                    val started = com.example.LiveVoiceManager.startScreenShare(projection, metrics)
+                    if (started) {
+                        Toast.makeText(context, "Screen Sharing Live! SAIF AI aapki screen dekh raha hai.", Toast.LENGTH_SHORT).show()
+                    }
+                } else {
+                    Toast.makeText(context, "Screen capture init failed", Toast.LENGTH_SHORT).show()
+                }
+            } catch (e: Exception) {
+                android.util.Log.e("BuildAIScreen", "Screen capture initialization error: ${e.message}", e)
+                Toast.makeText(context, "Screen share shuru karne me dikkat aayi: ${e.message}", Toast.LENGTH_SHORT).show()
+            }
+        } else {
+            com.example.LiveVoiceService.activeInstance?.demoteFromMediaProjection()
+            Toast.makeText(context, "Screen share cancel kiya gaya", Toast.LENGTH_SHORT).show()
+        }
+    }
+
     val micPermissionLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestPermission()
     ) { isGranted ->
         if (isGranted) {
-            Toast.makeText(context, "Microphone enabled. Press mic to talk.", Toast.LENGTH_SHORT).show()
+            showLiveBaatcheetChoiceDialog = true
+        } else {
+            Toast.makeText(context, "Microphone permission is required for Live Voice", Toast.LENGTH_LONG).show()
         }
     }
 
@@ -787,17 +821,15 @@ fun BuildAIScreen(
                         }
                     },
                     onStartLiveVoice = {
-                        if (ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
-                            micPermissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
+                        val isLive = com.example.LiveVoiceManager.isLiveModeActive.value
+                        if (isLive) {
+                            com.example.LiveVoiceManager.stopLiveVoice(context)
                         } else {
-                            if (!Settings.canDrawOverlays(context)) {
-                                val intent = Intent(
-                                    Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
-                                    Uri.parse("package:${context.packageName}")
-                                )
-                                context.startActivity(intent)
+                            if (ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
+                                micPermissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
+                            } else {
+                                showLiveBaatcheetChoiceDialog = true
                             }
-                            com.example.LiveVoiceManager.toggleLiveVoice(context)
                         }
                     },
                     onGalleryClick = {
@@ -936,6 +968,34 @@ fun BuildAIScreen(
                 showBuildProgress = true
             },
             onDismiss = { showAppRunnerDialog = false }
+        )
+    }
+
+    if (showLiveBaatcheetChoiceDialog) {
+        LiveBaatcheetChoiceDialog(
+            onDismiss = { showLiveBaatcheetChoiceDialog = false },
+            onSelectScreenShare = {
+                com.example.LiveVoiceManager.startLiveVoice(context, enableScreenShare = true)
+                if (mediaProjectionManager != null) {
+                    try {
+                        screenCaptureLauncher.launch(mediaProjectionManager.createScreenCaptureIntent())
+                    } catch (e: Exception) {
+                        Toast.makeText(context, "Screen capture init error: ${e.message}", Toast.LENGTH_SHORT).show()
+                    }
+                }
+            },
+            onSelectVoiceControl = {
+                if (!Settings.canDrawOverlays(context)) {
+                    try {
+                        val intent = Intent(
+                            Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
+                            Uri.parse("package:${context.packageName}")
+                        )
+                        context.startActivity(intent)
+                    } catch (_: Exception) {}
+                }
+                com.example.LiveVoiceManager.startLiveVoice(context, enableScreenShare = false)
+            }
         )
     }
 }

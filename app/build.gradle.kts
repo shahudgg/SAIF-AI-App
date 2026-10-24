@@ -59,6 +59,7 @@ android {
   }
   buildFeatures {
     compose = true
+    viewBinding = true
     buildConfig = true
   }
   testOptions { unitTests { isIncludeAndroidResources = true } }
@@ -100,6 +101,9 @@ dependencies {
   implementation(libs.androidx.compose.ui)
   implementation(libs.androidx.compose.ui.graphics)
   implementation(libs.androidx.compose.ui.tooling.preview)
+  implementation("androidx.media3:media3-exoplayer:1.5.1")
+  implementation("androidx.media3:media3-ui:1.5.1")
+  implementation("androidx.media3:media3-common:1.5.1")
   implementation(libs.androidx.core.ktx)
   // implementation(libs.androidx.datastore.preferences)
   implementation(libs.androidx.lifecycle.runtime.compose)
@@ -128,6 +132,16 @@ dependencies {
   implementation(libs.okhttp)
   // implementation(libs.play.services.location)
   implementation(libs.retrofit)
+  implementation("com.google.code.gson:gson:2.10.1")
+  implementation("androidx.security:security-crypto:1.1.0-alpha06")
+  implementation("androidx.webkit:webkit:1.12.0")
+  implementation("net.java.dev.jna:jna:5.13.0@aar")
+  implementation("com.alphacephei:vosk-android:0.3.75@aar")
+  implementation("androidx.recyclerview:recyclerview:1.3.2")
+  implementation("com.google.android.material:material:1.12.0")
+  implementation("androidx.constraintlayout:constraintlayout:2.2.0")
+  implementation("androidx.appcompat:appcompat:1.7.0")
+  implementation("androidx.fragment:fragment-ktx:1.8.6")
   testImplementation(libs.androidx.compose.ui.test.junit4)
   testImplementation(libs.androidx.core)
   testImplementation(libs.androidx.junit)

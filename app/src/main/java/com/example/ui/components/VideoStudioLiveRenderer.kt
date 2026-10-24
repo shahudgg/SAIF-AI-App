@@ -15,17 +15,21 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.scale
+import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.rotate
+import androidx.compose.ui.draw.scale
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.platform.LocalContext
+import coil.compose.AsyncImage
 import com.example.utils.TTSManager
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -61,14 +65,17 @@ fun LiveAutonomousVideoViewport(
 
     val pos = project.currentPositionSeconds
     val totalSec = project.totalDurationSeconds.coerceAtLeast(15.0f)
-    val script = project.script
-    val sections = script?.sections?.ifEmpty { null } ?: listOf(
-        VideoScriptSection(kind = "hook", narration = "Stop scrolling! Here is the secret.", emotion = "urgent", estSeconds = 3.5f),
-        VideoScriptSection(kind = "story", narration = "99% of people fail due to this one mistake.", emotion = "serious", estSeconds = 3.5f),
-        VideoScriptSection(kind = "insight", narration = "The proven rule is high-retention pacing and smart assets.", emotion = "excited", estSeconds = 3.5f),
-        VideoScriptSection(kind = "point", narration = "Actionable steps deliver 10x engagement fast.", emotion = "excited", estSeconds = 3.5f),
-        VideoScriptSection(kind = "cta", narration = "Follow right now for more viral blueprints!", emotion = "warm", estSeconds = 3.0f)
-    )
+    val sections: List<VideoScriptSection> = project.script?.sections ?: emptyList()
+    if (sections.isEmpty() && project.clips.isEmpty()) {
+        BlankProjectStudioView(
+            projectName = project.projectName,
+            isGenerating = isGenerating,
+            generatingStatus = generatingStatus,
+            onGenerateFromPrompt = onGenerateFromPrompt,
+            modifier = modifier
+        )
+        return
+    }
 
     // Calculate dynamic scene bounds from sections
     var accumulatedTime = 0f
@@ -173,6 +180,59 @@ fun LiveAutonomousVideoViewport(
                 .offset(x = panX.dp, y = panY.dp)
                 .background(Brush.verticalGradient(activeBg))
         )
+
+        // --- 1B. Active User Media Clip (Video or Photo from Gallery) ---
+        var clipStartAccum = 0f
+        var activeClipAtPos: TimelineMediaClip? = null
+        for (c in project.clips) {
+            val clipEnd = clipStartAccum + c.durationSeconds
+            if (pos in clipStartAccum..clipEnd) {
+                activeClipAtPos = c
+                break
+            }
+            clipStartAccum = clipEnd
+        }
+
+        if (activeClipAtPos?.uri != null) {
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .offset(x = activeClipAtPos.posX.dp, y = activeClipAtPos.posY.dp)
+                    .scale(activeClipAtPos.scale)
+                    .rotate(activeClipAtPos.rotation)
+                    .alpha(activeClipAtPos.opacity)
+            ) {
+                AsyncImage(
+                    model = activeClipAtPos.uri,
+                    contentDescription = activeClipAtPos.name,
+                    contentScale = ContentScale.Crop,
+                    modifier = Modifier.fillMaxSize()
+                )
+            }
+        }
+
+        // --- 1C. Active Visual Asset / Sticker from Track 3 ---
+        val activeVisualAsset = project.getResolvedVisualAssets().firstOrNull {
+            pos in it.startSeconds..(it.startSeconds + it.durationSeconds)
+        }
+        if (activeVisualAsset?.imageUri != null) {
+            Box(
+                modifier = Modifier
+                    .size(110.dp)
+                    .align(Alignment.Center)
+                    .offset(x = activeVisualAsset.posX.dp, y = activeVisualAsset.posY.dp)
+                    .scale(activeVisualAsset.scale)
+                    .rotate(activeVisualAsset.rotation)
+                    .alpha(activeVisualAsset.opacity)
+            ) {
+                AsyncImage(
+                    model = activeVisualAsset.imageUri,
+                    contentDescription = activeVisualAsset.name,
+                    contentScale = ContentScale.Fit,
+                    modifier = Modifier.fillMaxSize()
+                )
+            }
+        }
 
         // Canvas for floating dynamic particles & ambient beat pulses
         Canvas(modifier = Modifier.fillMaxSize()) {
@@ -347,7 +407,38 @@ fun LiveAutonomousVideoViewport(
             )
         }
 
-        // --- 4. Discreet Video Header (Sleek Timecode & Ratio, No Giant Debug Text) ---
+        // --- 4A. Telegram Catalog Asset Badge (Top Left) ---
+        val activeClip = project.clips.getOrNull(activeSectionIndex) ?: project.clips.firstOrNull()
+        val assetLabel = activeClip?.name?.ifBlank { "Telegram Catalog Scene" } ?: "Telegram Catalog Asset"
+        Surface(
+            shape = RoundedCornerShape(12.dp),
+            color = Color.Black.copy(alpha = 0.65f),
+            border = BorderStroke(1.dp, Color(0xFFA855F7).copy(alpha = 0.6f)),
+            modifier = Modifier
+                .align(Alignment.TopStart)
+                .padding(10.dp)
+        ) {
+            Row(
+                modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.5.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(
+                    text = "📡 Telegram: ",
+                    color = Color(0xFFC084FC),
+                    fontSize = 8.5.sp,
+                    fontWeight = FontWeight.Bold
+                )
+                Text(
+                    text = assetLabel.take(20),
+                    color = Color.White,
+                    fontSize = 8.5.sp,
+                    fontFamily = FontFamily.Monospace,
+                    fontWeight = FontWeight.SemiBold
+                )
+            }
+        }
+
+        // --- 4B. Discreet Video Header (Sleek Timecode & Ratio) ---
         Row(
             modifier = Modifier
                 .align(Alignment.TopEnd)
@@ -376,13 +467,40 @@ fun LiveAutonomousVideoViewport(
                     )
                 }
             }
+            if (project.isProxyModeEnabled) {
+                Surface(
+                    shape = RoundedCornerShape(12.dp),
+                    color = Color.Black.copy(alpha = 0.65f),
+                    border = BorderStroke(1.dp, Color(0xFF35E6A0))
+                ) {
+                    Row(
+                        modifier = Modifier.padding(horizontal = 6.dp, vertical = 3.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Box(
+                            modifier = Modifier
+                                .size(5.dp)
+                                .clip(CircleShape)
+                                .background(Color(0xFF35E6A0))
+                        )
+                        Spacer(modifier = Modifier.width(3.dp))
+                        Text(
+                            text = "PROXY 720P",
+                            color = Color(0xFF35E6A0),
+                            fontSize = 8.sp,
+                            fontFamily = FontFamily.Monospace,
+                            fontWeight = FontWeight.Bold
+                        )
+                    }
+                }
+            }
             Surface(
                 shape = RoundedCornerShape(12.dp),
                 color = Color.Black.copy(alpha = 0.55f),
                 border = BorderStroke(1.dp, Color(0x4000DAF3))
             ) {
                 Text(
-                    text = "9:16",
+                    text = project.aspectRatio,
                     color = Color(0xFF00DAF3),
                     fontSize = 8.5.sp,
                     fontFamily = FontFamily.Monospace,
@@ -393,8 +511,11 @@ fun LiveAutonomousVideoViewport(
         }
 
         // --- 5. Clean, Professional Lower-Third Captions (Shorts / Hormozi Style) ---
-        // Shows 3-5 punchy words at a time based on current time in scene narration
-        val words = activeNarration.split(Regex("\\s+")).filter { it.isNotBlank() }
+        val customTextItem = project.getResolvedTextSubtitles().firstOrNull {
+            pos in it.startSeconds..(it.startSeconds + it.durationSeconds)
+        }
+        val captionTextToDisplay = customTextItem?.text ?: activeNarration
+        val words = captionTextToDisplay.split(Regex("\\s+")).filter { it.isNotBlank() }
         if (words.isNotEmpty()) {
             val wordsPerSec = (words.size.toFloat() / sceneDuration).coerceIn(1.5f, 4.0f)
             val currentWordIdx = ((pos - activeSectionStart) * wordsPerSec).toInt().coerceIn(0, words.lastIndex)
@@ -405,17 +526,25 @@ fun LiveAutonomousVideoViewport(
             val endW = (startW + windowSize).coerceAtMost(words.size)
             val displayWords = words.subList(startW, endW)
 
+            val parsedTextColor = try {
+                if (customTextItem != null) Color(android.graphics.Color.parseColor(customTextItem.colorHex)) else Color(0xFFFFE600)
+            } catch (_: Exception) {
+                Color(0xFFFFE600)
+            }
+
             Box(
                 modifier = Modifier
                     .align(Alignment.BottomCenter)
                     .fillMaxWidth()
+                    .offset(x = (customTextItem?.posX ?: 0f).dp, y = (customTextItem?.posY ?: 0f).dp)
+                    .scale(customTextItem?.scale ?: 1.0f)
                     .padding(horizontal = 16.dp, vertical = 24.dp),
                 contentAlignment = Alignment.Center
             ) {
                 Surface(
                     shape = RoundedCornerShape(12.dp),
-                    color = Color.Black.copy(alpha = 0.72f),
-                    border = BorderStroke(1.5.dp, Color(0x6000DAF3)),
+                    color = if (customTextItem?.hasBackgroundBox == true) Color.Black.copy(alpha = 0.88f) else Color.Black.copy(alpha = 0.65f),
+                    border = BorderStroke(1.5.dp, if (customTextItem?.hasOutline == true) parsedTextColor else Color(0x6000DAF3)),
                     shadowElevation = 8.dp
                 ) {
                     Row(
@@ -428,10 +557,10 @@ fun LiveAutonomousVideoViewport(
                             val isActive = absoluteWordIdx == currentWordIdx
                             Text(
                                 text = w,
-                                color = if (isActive) Color(0xFFFFE600) else Color.White,
-                                fontSize = if (isActive) 14.5.sp else 13.sp,
+                                color = if (isActive) parsedTextColor else Color.White,
+                                fontSize = if (isActive) ((customTextItem?.fontSize ?: 22f) * 0.65f).sp else ((customTextItem?.fontSize ?: 22f) * 0.58f).sp,
                                 fontWeight = if (isActive) FontWeight.ExtraBold else FontWeight.Bold,
-                                fontFamily = FontFamily.SansSerif,
+                                fontFamily = if (customTextItem?.fontFamily == "Mono") FontFamily.Monospace else FontFamily.SansSerif,
                                 modifier = Modifier
                                     .padding(horizontal = 3.dp)
                                     .scale(if (isActive) 1.08f else 1.0f)
@@ -517,8 +646,14 @@ fun LivePythonCodeRenderer(
     onStartRender: () -> Unit,
     modifier: Modifier = Modifier
 ) {
-    val pythonCode = project.activeEditPlan?.why
-        ?: "# Standalone MoviePy rendering script ready on demand.\nimport moviepy.editor as mp\nprint('Assembling EDL timeline...')"
+    val context = LocalContext.current
+    val pythonCode = remember(project) {
+        if (!project.activeEditPlan?.why.isNullOrBlank()) {
+            project.activeEditPlan!!.why!!
+        } else {
+            SaifAiEditingEngine.generatePythonCodeForProject(project)
+        }
+    }
 
     Column(
         modifier = modifier
@@ -538,25 +673,69 @@ fun LivePythonCodeRenderer(
                 Text("render_timeline.py", color = Color.White, fontSize = 11.5.sp, fontFamily = FontFamily.Monospace, fontWeight = FontWeight.Bold)
             }
 
-            Surface(
-                onClick = onStartRender,
-                enabled = !isSimulatingRender,
-                shape = RoundedCornerShape(8.dp),
-                color = if (isSimulatingRender) Color(0xFF2A2A2A) else Color(0xFF10B981),
-                border = BorderStroke(1.dp, Color(0xFF34D399))
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(6.dp)
             ) {
-                Row(
-                    modifier = Modifier.padding(horizontal = 10.dp, vertical = 5.dp),
-                    verticalAlignment = Alignment.CenterVertically
+                // Copy Code Button
+                Surface(
+                    onClick = {
+                        val clipboard = context.getSystemService(android.content.Context.CLIPBOARD_SERVICE) as? android.content.ClipboardManager
+                        val clip = android.content.ClipData.newPlainText("render_timeline.py", pythonCode)
+                        clipboard?.setPrimaryClip(clip)
+                        android.widget.Toast.makeText(context, "📋 Code copied to clipboard!", android.widget.Toast.LENGTH_SHORT).show()
+                    },
+                    shape = RoundedCornerShape(8.dp),
+                    color = Color(0xFF1E293B),
+                    border = BorderStroke(1.dp, Color(0xFF334155))
                 ) {
-                    if (isSimulatingRender) {
-                        CircularProgressIndicator(modifier = Modifier.size(12.dp), color = Color.White, strokeWidth = 1.5.dp)
-                        Spacer(modifier = Modifier.width(6.dp))
-                        Text("Rendering... ${(renderProgress * 100).toInt()}%", color = Color.White, fontSize = 10.sp, fontFamily = FontFamily.Monospace)
-                    } else {
-                        Icon(Icons.Default.PlayArrow, contentDescription = null, tint = Color.Black, modifier = Modifier.size(14.dp))
-                        Spacer(modifier = Modifier.width(4.dp))
-                        Text("RUN RENDER", color = Color.Black, fontSize = 10.5.sp, fontWeight = FontWeight.Bold, fontFamily = FontFamily.Monospace)
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier.padding(horizontal = 6.dp, vertical = 4.dp)
+                    ) {
+                        Icon(Icons.Default.ContentCopy, contentDescription = "Copy", tint = Color(0xFF94A3B8), modifier = Modifier.size(12.dp))
+                        Spacer(modifier = Modifier.width(3.dp))
+                        Text("Copy", color = Color(0xFF94A3B8), fontSize = 10.sp, fontFamily = FontFamily.Monospace)
+                    }
+                }
+
+                // Run Code Engine Button (Level 5)
+                Surface(
+                    onClick = onStartRender,
+                    enabled = !isSimulatingRender,
+                    shape = RoundedCornerShape(8.dp),
+                    color = if (isSimulatingRender) Color(0xFF065F46) else Color(0xFF10B981),
+                    border = BorderStroke(1.dp, Color(0xFF34D399))
+                ) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
+                    ) {
+                        if (isSimulatingRender) {
+                            CircularProgressIndicator(
+                                modifier = Modifier.size(11.dp),
+                                color = Color.White,
+                                strokeWidth = 1.5.dp
+                            )
+                            Spacer(modifier = Modifier.width(5.dp))
+                            Text(
+                                text = "Rendering ${(renderProgress * 100).toInt()}%...",
+                                color = Color.White,
+                                fontSize = 10.sp,
+                                fontFamily = FontFamily.Monospace,
+                                fontWeight = FontWeight.Bold
+                            )
+                        } else {
+                            Icon(Icons.Default.PlayArrow, contentDescription = null, tint = Color.Black, modifier = Modifier.size(12.dp))
+                            Spacer(modifier = Modifier.width(3.dp))
+                            Text(
+                                text = "Run Code Engine (Level 5)",
+                                color = Color.Black,
+                                fontSize = 10.sp,
+                                fontFamily = FontFamily.Monospace,
+                                fontWeight = FontWeight.Bold
+                            )
+                        }
                     }
                 }
             }

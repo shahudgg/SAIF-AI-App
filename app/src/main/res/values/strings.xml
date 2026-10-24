@@ -1,4 +1,30 @@
 <resources>
     <string name="app_name">SAIF AI</string>
     <string name="accessibility_service_description">SAIF AI Accessibility Automation service helps perform hands-free voice automation, screen interactions, and device navigation on your request.</string>
+
+    <!-- App & Navigation Strings -->
+    <string name="desc_back">Back</string>
+    <string name="memory_title">Memory Vault</string>
+    <string name="search_memories">Search memories...</string>
+    <string name="category_all">All</string>
+    <string name="category_personal">Personal</string>
+    <string name="category_preferences">Preferences</string>
+    <string name="category_contacts">Contacts</string>
+    <string name="category_routines">Routines</string>
+    <string name="category_notes">Notes</string>
+    <string name="no_memories">No memories saved yet</string>
+
+    <string name="chat_label_you">You</string>
+    <string name="chat_label_jarvis">JARVIS</string>
+    <string name="chat_history_title">Chat History</string>
+    <string name="clear_history">Clear History</string>
+    <string name="no_history">No conversation history found</string>
+
+    <string-array name="overlay_edges">
+        <item>Left Edge</item>
+        <item>Right Edge</item>
+        <item>Top Edge</item>
+        <item>Bottom Edge</item>
+        <item>Free Floating</item>
+    </string-array>
 </resources>

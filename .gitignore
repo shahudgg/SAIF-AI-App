@@ -1,21 +1,35 @@
 *.iml
-.gradle
-.kotlin
+.gradle/
+.kotlin/
 /local.properties
-/.idea/caches
-/.idea/libraries
-/.idea/modules.xml
-/.idea/workspace.xml
-/.idea/navEditor.xml
-/.idea/assetWizardSettings.xml
-.DS_Store
-/build
-/captures
-.externalNativeBuild
-.cxx
 local.properties
 .env
-debug.keystore
-/.build-outputs
+.env.local
+.DS_Store
+
+# Build artifacts & outputs
+build/
+*/build/
+app/build/
+.build-outputs/
 *.apk
+*.aab
 *.log
+captures/
+.externalNativeBuild/
+.cxx/
+
+# IDE configs
+.idea/
+
+# AI Studio internal artifacts & extracted archives
+.aistudio/
+extracted_project/
+extracted_source/
+
+# Keystores & sensitive keys
+debug.keystore
+
+# GitHub Actions workflows (AI Studio OAuth lacks the 'workflow' scope; push directly or via GitHub Web UI)
+.github/workflows/
+

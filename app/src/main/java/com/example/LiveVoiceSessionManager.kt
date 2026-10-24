@@ -324,6 +324,47 @@ class LiveVoiceSessionManager(
                 )
             }
 
+            // 1. High-priority Jarvis Multi-Command & Device Automation check
+            if (com.example.util.JarvisMultiCommandEngine.hasJarvisCommand(cleanUtterance)) {
+                Log.i(TAG, "LiveVoice routing to JarvisMultiCommandEngine: \"$cleanUtterance\"")
+                _sessionState.value = VoiceSessionState.PROCESSING
+                _liveSubtitle.value = "Executing..."
+                turnManager.setTaskRunning(true, cleanUtterance)
+                try {
+                    val multiResult = com.example.util.JarvisMultiCommandEngine.executeCompoundPrompt(context, cleanUtterance)
+                    if (multiResult.handled) {
+                        val speechSummary = multiResult.summaryFeedback
+                            .replace(Regex("[⚡•*#]"), "")
+                            .replace("\n", ". ")
+                            .trim()
+                        enqueueSentenceForSpeech(speechSummary)
+                        playNextSentenceIfAvailable()
+
+                        if (activeSessionId != null) {
+                            repo.insertMessage(
+                                ChatMessageEntity(
+                                    sessionId = activeSessionId,
+                                    role = "model",
+                                    content = multiResult.summaryFeedback,
+                                    timestamp = System.currentTimeMillis()
+                                )
+                            )
+                        }
+
+                        if (multiResult.remainingAiQuery.isNullOrBlank()) {
+                            _sessionState.value = VoiceSessionState.LISTENING
+                            _liveSubtitle.value = "LISTENING"
+                            turnManager.transitionTo(TurnState.LISTENING)
+                            return
+                        }
+                    }
+                } catch (e: Exception) {
+                    Log.e(TAG, "JarvisMultiCommandEngine failed in LiveVoice: ${e.message}", e)
+                } finally {
+                    turnManager.setTaskRunning(false, "")
+                }
+            }
+
             val isAgentRunning = com.example.agent.PhoneAgentRuntime.status.value.state == com.example.agent.AgentStatusState.RUNNING
             val routeDecision = com.example.agent.IntentRouter.route(cleanUtterance, isAgentRunning)
 
@@ -438,6 +479,18 @@ class LiveVoiceSessionManager(
                 Pair(if (entity.role == "user") "user" else "model", entity.content)
             }
 
+            val isScreenShare = com.example.vision.ScreenCaptureManager.getInstance().isScreenShareActive()
+            val screenBytes = if (isScreenShare) {
+                com.example.vision.ScreenCaptureManager.getInstance().captureSnapshotJpeg(70)
+            } else null
+            val screenBase64List = if (screenBytes != null && screenBytes.isNotEmpty()) {
+                listOf(Base64.encodeToString(screenBytes, Base64.NO_WRAP))
+            } else emptyList()
+
+            val promptWithVision = if (screenBase64List.isNotEmpty()) {
+                "[Screen Sharing Active: The user is currently sharing their mobile screen live with you. See the attached snapshot of their active display.]\n$cleanUtterance"
+            } else cleanUtterance
+
             val memoryBlock = SmartConversationMemory.buildMemoryPromptBlock()
             val service = SaifAccessibilityService.instance
             val activeApp = service?.getCurrentAppLabel(context) ?: "Home Screen"
@@ -449,6 +502,7 @@ You are SAIF AI, an advanced real-time Android voice assistant.
 $memoryBlock
 
 CURRENT ACTIVE SCREEN: You are currently on the screen of '$activeApp' (Package: $currentPkg).
+${if (isScreenShare) "SCREEN SHARING: Live screen sharing is active. You can see the user's mobile screen clearly. Answer questions about what's on their screen, help them navigate apps, and read on-screen text." else ""}
 ${if (screenHierarchy.isNotBlank()) "VISIBLE SCREEN CONTENT:\n$screenHierarchy\n" else ""}
 AUTONOMOUS DEVICE AUTOMATION ACTIONS:
 You have native access to control the Android phone, perform human-like touches, navigate apps, and execute multi-step macros.
@@ -464,7 +518,7 @@ When the user asks to perform device actions or macros, output an action block a
 ACTIONS>>>
 
 SPOKEN RESPONSE FORMAT:
-- If actions are executed, confirm what was done briefly and confidently like Jarvis ("Yes sir, ...", "Theek hai sir, ...").
+- If actions are executed, confirm what was done briefly and confidently as SAIF AI ("Yes sir, ...", "Theek hai sir, ...").
 - Provide a friendly, concise 1-2 sentence spoken reply in Hindi/English/Hinglish (matching the user's spoken language).
 - Speak naturally like a real human.
 - STRICT RULE: NEVER output programming code, Kotlin, Java, markdown blocks, JSON, asterisks, or bullet points in your spoken reply.
@@ -478,11 +532,11 @@ SPOKEN RESPONSE FORMAT:
             var isInsideActionBlock = false
 
             val apiResult = AIApiUtility.executeWithFallback(
-                prompt = cleanUtterance,
+                prompt = promptWithVision,
                 mode = "general",
                 history = conversationHistory,
                 customSystemPrompt = fullSystemPrompt,
-                base64Images = emptyList(),
+                base64Images = screenBase64List,
                 onChunk = { chunk ->
                     if (!kotlinx.coroutines.currentCoroutineContext().isActive) return@executeWithFallback
                     fullModelResponseBuilder.append(chunk)

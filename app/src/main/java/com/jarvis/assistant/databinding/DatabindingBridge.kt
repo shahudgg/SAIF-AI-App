@@ -1,0 +1,22 @@
+package com.jarvis.assistant.databinding
+
+typealias ActivityApiConnectionBinding = com.example.databinding.ActivityApiConnectionBinding
+typealias ActivityHandsFreeBinding = com.example.databinding.ActivityHandsFreeBinding
+typealias ActivityMainBinding = com.example.databinding.ActivityMainBinding
+typealias ActivityMemoryBinding = com.example.databinding.ActivityMemoryBinding
+typealias ActivityOverlayAvatarBinding = com.example.databinding.ActivityOverlayAvatarBinding
+typealias ActivityPermissionBinding = com.example.databinding.ActivityPermissionBinding
+typealias ActivityPersonaBinding = com.example.databinding.ActivityPersonaBinding
+typealias ActivityPrivacyShieldBinding = com.example.databinding.ActivityPrivacyShieldBinding
+typealias ActivitySettingsBinding = com.example.databinding.ActivitySettingsBinding
+typealias ActivityVoiceEnrollmentBinding = com.example.databinding.ActivityVoiceEnrollmentBinding
+typealias BottomSheetThemeSelectionBinding = com.example.databinding.BottomSheetThemeSelectionBinding
+typealias FragmentChatBinding = com.example.databinding.FragmentChatBinding
+typealias FragmentHomeBinding = com.example.databinding.FragmentHomeBinding
+typealias FragmentSettingsBinding = com.example.databinding.FragmentSettingsBinding
+typealias FragmentUpdatesBinding = com.example.databinding.FragmentUpdatesBinding
+typealias ItemChatTurnBinding = com.example.databinding.ItemChatTurnBinding
+typealias ItemJarvisChatMessageBinding = com.example.databinding.ItemJarvisChatMessageBinding
+typealias ItemMemoryBinding = com.example.databinding.ItemMemoryBinding
+typealias ItemNairaChatMessageBinding = com.example.databinding.ItemNairaChatMessageBinding
+typealias SheetChatHistoryBinding = com.example.databinding.SheetChatHistoryBinding

@@ -247,6 +247,11 @@ fun PermissionRow(
         "phone" -> Icons.Default.Phone
         "message" -> Icons.AutoMirrored.Filled.Message
         "notifications" -> Icons.Default.NotificationsActive
+        "battery" -> Icons.Default.BatteryChargingFull
+        "settings" -> Icons.Default.Tune
+        "location" -> Icons.Default.LocationOn
+        "bluetooth" -> Icons.Default.Bluetooth
+        "screen_share" -> Icons.Default.ScreenShare
         else -> Icons.Default.Security
     }
 

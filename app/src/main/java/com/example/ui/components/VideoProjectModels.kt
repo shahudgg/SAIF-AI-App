@@ -7,7 +7,7 @@ import android.net.Uri
  */
 data class TimelineMediaClip(
     val id: String = java.util.UUID.randomUUID().toString(),
-    val name: String,
+    val name: String = "Media Clip",
     val uri: Uri? = null,
     val durationSeconds: Float = 6.0f,
     val isAiEnhanced: Boolean = false,
@@ -16,14 +16,30 @@ data class TimelineMediaClip(
     val speed: Float = 1.0f,
     val volume: Float = 1.0f,
     val rotation: Float = 0f,
+    val posX: Float = 0f,
+    val posY: Float = 0f,
     val isFlippedHorizontally: Boolean = false,
     val transitionIn: String = "None",
+    val transitionDuration: Float = 1.0f, // Level 4
+    val speedRampCurve: String = "Linear", // Level 4
+    val filterName: String = "Original",   // Level 3
+    val filterIntensity: Float = 0.8f,     // Level 3
+    val keyframes: List<VideoKeyframe> = emptyList(), // Level 4
     val origin: String = "manual", // "manual" or "ai" (Level 16 Timeline Memory)
     val aiWhy: String = "",        // Plain-language reason for AI edit (Level 13)
     val inSeconds: Float = 0f,
     val outSeconds: Float = 6.0f,
     val scale: Float = 1.0f,
     val opacity: Float = 1.0f,
+    val blendMode: String = "Normal", // Normal, Screen, Multiply, Overlay, Add
+    val neonGlow: Float = 0f,         // 0 to 100
+    val dropShadow: Float = 0f,       // 0 to 50
+    val blurRadius: Float = 0f,       // 0 to 25
+    val brightness: Float = 0f,       // -1.0 to 1.0
+    val contrast: Float = 1.0f,       // 0.5 to 2.0
+    val saturation: Float = 1.0f,     // 0.0 to 2.0
+    val inAnimation: String = "Fade In", // Pop-in, Bounce, Slide, Fade In, 3D Flip
+    val outAnimation: String = "Fade Out",
     val lastModified: Long = System.currentTimeMillis()
 )
 
@@ -104,6 +120,7 @@ data class TimelineMarkerItem(
  */
 data class VideoProjectData(
     val projectName: String = "Untitled Video Project",
+    val title: String = projectName,
     val resolution: String = "1080P",
     val fps: String = "60FPS",
     val totalDurationSeconds: Float = 0.0f,
@@ -137,7 +154,171 @@ data class VideoProjectData(
     val autoCaptions: List<VideoCaptionItem> = emptyList(),
     val bRollItems: List<VideoBRollItem> = emptyList(),
     val timelineMarkers: List<TimelineMarkerItem> = emptyList(),
-    val selectedLanguage: String = "Hindi & English"
+    val selectedLanguage: String = "Hindi & English",
+    val isProxyModeEnabled: Boolean = false,
+    val timelineZoom: Float = 1.0f,
+    val selectedTrackNumber: Int = 1,
+    val selectedCardId: String = "",
+    val codeTracks: List<CodeAnimationTrackItem> = emptyList(),
+    val visualAssetTracks: List<VisualAssetTrackItem> = emptyList(),
+    val textSubtitleTracks: List<TextSubtitleTrackItem> = emptyList(),
+    val voiceoverTracks: List<VoiceoverTrackItem> = emptyList(),
+    val soundAudioTracks: List<SoundAudioTrackItem> = emptyList()
+) {
+    fun getResolvedCodeTracks(): List<CodeAnimationTrackItem> = codeTracks
+    fun getResolvedVisualAssets(): List<VisualAssetTrackItem> = visualAssetTracks
+    fun getResolvedTextSubtitles(): List<TextSubtitleTrackItem> = textSubtitleTracks
+    fun getResolvedVoiceoverTracks(): List<VoiceoverTrackItem> = voiceoverTracks
+    fun getResolvedSoundAudioTracks(): List<SoundAudioTrackItem> = soundAudioTracks
+}
+
+/**
+ * Track 1: Code Animation Item (HTML5/CSS3/GSAP Motion Graphics)
+ */
+data class CodeAnimationTrackItem(
+    val id: String = java.util.UUID.randomUUID().toString(),
+    val title: String,
+    val startSeconds: Float,
+    val durationSeconds: Float,
+    val htmlCode: String = "",
+    val animationType: String = "3D Camera Perspective",
+    val isProxyCached: Boolean = false,
+    val scale: Float = 1.0f,
+    val posX: Float = 0f,
+    val posY: Float = 0f,
+    val rotation: Float = 0f,
+    val opacity: Float = 1.0f,
+    val neonGlow: Float = 0f,
+    val inAnimation: String = "Pop-in",
+    val outAnimation: String = "Fade Out"
+)
+
+/**
+ * Track 3: Visual Asset Item (Overlays, Stickers, Telegram & Local Media)
+ */
+data class VisualAssetTrackItem(
+    val id: String = java.util.UUID.randomUUID().toString(),
+    val name: String,
+    val startSeconds: Float,
+    val durationSeconds: Float,
+    val assetType: String = "telegram_graphic",
+    val imageUri: String? = null,
+    val telegramFileId: String? = null,
+    val scale: Float = 1.0f,
+    val posX: Float = 0f,
+    val posY: Float = 0f,
+    val rotation: Float = 0f,
+    val opacity: Float = 1.0f,
+    val blendMode: String = "Normal",
+    val neonGlow: Float = 0f,
+    val dropShadow: Float = 0f,
+    val blurRadius: Float = 0f,
+    val brightness: Float = 0f,
+    val contrast: Float = 1.0f,
+    val saturation: Float = 1.0f,
+    val inAnimation: String = "Pop-in",
+    val outAnimation: String = "Fade Out"
+)
+
+/**
+ * Track 4: Text Subtitle Item (Kinetic Subtitles, Title Overlays)
+ */
+data class TextSubtitleTrackItem(
+    val id: String = java.util.UUID.randomUUID().toString(),
+    val text: String,
+    val startSeconds: Float = 0f,
+    val durationSeconds: Float = 3.0f,
+    val style: String = "Hormozi Neon",
+    val fontFamily: String = "Montserrat",
+    val fontSize: Float = 22f,
+    val colorHex: String = "#00DAF3",
+    val textColorHex: String = colorHex,
+    val strokeColorHex: String = "#000000",
+    val strokeWidth: Float = 2f,
+    val hasOutline: Boolean = true,
+    val neonGlow: Float = 40f,
+    val hasBackgroundBox: Boolean = false,
+    val backgroundBoxColorHex: String = "#80000000",
+    val boxColorHex: String = backgroundBoxColorHex,
+    val animation: String = "Hormozi Word-by-Word",
+    val animationPreset: String = animation,
+    val scale: Float = 1.0f,
+    val posX: Float = 0f,
+    val posY: Float = 0f,
+    val rotation: Float = 0f
+)
+
+/**
+ * Track 5: AI Voiceover Item (TTS Spoken Sentences)
+ */
+data class VoiceoverTrackItem(
+    val id: String = java.util.UUID.randomUUID().toString(),
+    val narration: String,
+    val startSeconds: Float = 0f,
+    val durationSeconds: Float = 4.0f,
+    val speakerTone: String = "Energetic",
+    val audioUri: String? = null,
+    val volume: Float = 1.0f,
+    val speed: Float = 1.0f,
+    val fadeInSeconds: Float = 0f,
+    val fadeOutSeconds: Float = 0f,
+    val isDuckingEnabled: Boolean = true,
+    val audioDucking: Boolean = isDuckingEnabled
+)
+
+/**
+ * Track 6: Sound Track Item (Sound Effects & Background Music)
+ */
+data class SoundAudioTrackItem(
+    val id: String = java.util.UUID.randomUUID().toString(),
+    val title: String,
+    val startSeconds: Float = 0f,
+    val durationSeconds: Float = 5.0f,
+    val isSfx: Boolean = false,
+    val volume: Float = 1.0f,
+    val speed: Float = 1.0f,
+    val fadeInSeconds: Float = 0f,
+    val fadeOutSeconds: Float = 0f,
+    val isDuckingEnabled: Boolean = false,
+    val audioDucking: Boolean = isDuckingEnabled,
+    val audioUri: String? = null
+)
+
+/**
+ * Level 4: Keyframe Animation point for spatial and temporal interpolation
+ */
+data class VideoKeyframe(
+    val id: String = java.util.UUID.randomUUID().toString(),
+    val timeOffsetSeconds: Float,
+    val scale: Float = 1.0f,
+    val posX: Float = 0f,
+    val posY: Float = 0f,
+    val rotation: Float = 0f,
+    val opacity: Float = 1.0f,
+    val easing: String = "EaseInOut" // Linear, EaseIn, EaseOut, EaseInOut, BezierCubic, Elastic
+)
+
+/**
+ * Level 4: Speed Ramp Curve Preset definition with cubic bezier velocity points
+ */
+data class SpeedRampPreset(
+    val id: String,
+    val name: String,
+    val description: String,
+    val points: List<Pair<Float, Float>>, // normalized (t, speedMultiplier)
+    val defaultDurationMultiplier: Float = 1.0f
+)
+
+/**
+ * Level 4: Cinematic Transition item
+ */
+data class CinematicTransition(
+    val id: String,
+    val name: String,
+    val category: String, // "Whip", "Glitch", "Dissolve", "Warp", "Light", "3D"
+    val durationSeconds: Float = 1.0f,
+    val intensity: Float = 1.0f,
+    val curve: String = "CubicEaseInOut"
 )
 
 /**
@@ -145,6 +326,7 @@ data class VideoProjectData(
  */
 enum class VideoStudioToolTab {
     NONE,
+    TUNE,
     EDIT,
     AUDIO,
     TEXT,
@@ -265,5 +447,95 @@ object VideoEditorPresets {
         ProFeatureItem("pro_storyboard", "Script to Storyboard AI", "Transforms written ideas into paced scene edits and rhythm guidelines.", "AI Intelligence", "SCRIPT AI"),
         ProFeatureItem("pro_motionblur", "Cinematic Motion Blur", "180-degree shutter angle synthesis giving cinematic smoothness to fast pans.", "VFX / Compositing", "SHUTTER 180°"),
         ProFeatureItem("pro_freeze", "Freeze Frame & Action Climax", "Instant 2-second impact freeze frame with dramatic zoom accent.", "Motion & Timing", "CLIMAX FX")
+    )
+
+    val ALL_SPEED_RAMP_PRESETS = listOf(
+        SpeedRampPreset(
+            id = "ramp_hero",
+            name = "Hero Moment",
+            description = "Fast in, dramatic slow-mo center, fast punch out",
+            points = listOf(0.0f to 2.0f, 0.3f to 0.35f, 0.7f to 0.35f, 1.0f to 2.5f)
+        ),
+        SpeedRampPreset(
+            id = "ramp_bullet",
+            name = "Bullet Time",
+            description = "Real-time to ultra-slow matrix freeze to snap recovery",
+            points = listOf(0.0f to 1.0f, 0.4f to 0.15f, 0.6f to 0.15f, 1.0f to 1.5f)
+        ),
+        SpeedRampPreset(
+            id = "ramp_flash_in",
+            name = "Flash In",
+            description = "Explosive 3x intro decelerating to 1x normal speed",
+            points = listOf(0.0f to 3.0f, 0.25f to 2.0f, 0.5f to 1.0f, 1.0f to 1.0f)
+        ),
+        SpeedRampPreset(
+            id = "ramp_flash_out",
+            name = "Flash Out",
+            description = "Smooth 1x flow accelerating to 3x hyperdrive cut",
+            points = listOf(0.0f to 1.0f, 0.5f to 1.0f, 0.75f to 2.2f, 1.0f to 3.5f)
+        ),
+        SpeedRampPreset(
+            id = "ramp_montage",
+            name = "Montage Rhythm",
+            description = "Alternating pacing for beat-synced travel & action",
+            points = listOf(0.0f to 1.6f, 0.3f to 0.6f, 0.6f to 1.8f, 1.0f to 1.0f)
+        ),
+        SpeedRampPreset(
+            id = "ramp_linear",
+            name = "Linear Flow",
+            description = "Constant standard real-time 1.0x playback",
+            points = listOf(0.0f to 1.0f, 1.0f to 1.0f)
+        )
+    )
+
+    val ALL_CINEMATIC_TRANSITIONS = listOf(
+        CinematicTransition(
+            id = "trans_whip",
+            name = "Whip Pan Rush",
+            category = "Whip",
+            durationSeconds = 0.6f,
+            intensity = 1.0f,
+            curve = "CubicEaseInOut"
+        ),
+        CinematicTransition(
+            id = "trans_glitch",
+            name = "Cyberpunk Glitch",
+            category = "Glitch",
+            durationSeconds = 0.5f,
+            intensity = 1.2f,
+            curve = "Elastic"
+        ),
+        CinematicTransition(
+            id = "trans_dissolve",
+            name = "Cross Dissolve",
+            category = "Dissolve",
+            durationSeconds = 0.8f,
+            intensity = 1.0f,
+            curve = "Linear"
+        ),
+        CinematicTransition(
+            id = "trans_warp",
+            name = "Spacetime Warp",
+            category = "Warp",
+            durationSeconds = 0.7f,
+            intensity = 1.0f,
+            curve = "EaseInOutQuad"
+        ),
+        CinematicTransition(
+            id = "trans_light",
+            name = "Solar Light Leak",
+            category = "Light",
+            durationSeconds = 0.6f,
+            intensity = 1.5f,
+            curve = "EaseOutCubic"
+        ),
+        CinematicTransition(
+            id = "trans_3d",
+            name = "3D Dimension Flip",
+            category = "3D",
+            durationSeconds = 0.9f,
+            intensity = 1.0f,
+            curve = "CubicEaseInOut"
+        )
     )
 }

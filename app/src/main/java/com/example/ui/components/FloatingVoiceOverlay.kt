@@ -3,6 +3,7 @@ package com.example.ui.components
 import androidx.compose.animation.core.*
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.interaction.MutableInteractionSource
@@ -52,6 +53,7 @@ fun FloatingVoiceOverlay(
     val amplitude by engine.amplitude.collectAsState(initial = 0f)
     val state by engine.sessionState.collectAsState(initial = VoiceSessionState.IDLE)
     val liveSubtitle by engine.liveSubtitle.collectAsState(initial = "")
+    val isScreenSharing by com.example.LiveVoiceManager.isScreenSharingActive.collectAsState()
 
     if (isInApp) {
         Box(
@@ -68,17 +70,73 @@ fun FloatingVoiceOverlay(
                 },
             contentAlignment = Alignment.Center
         ) {
-            // Main glowing sparkle star animation in place of the old pink circle
-            SaifSparkleLiveVoiceAnimation(
-                state = state,
-                amplitude = amplitude,
-                sizeDp = 260.dp,
-                onClick = {
-                    if (state == VoiceSessionState.SPEAKING) {
-                        engine.stopSpeaking()
-                    }
+            // Screen Share Badge at Top
+            if (isScreenSharing) {
+                Row(
+                    modifier = Modifier
+                        .align(Alignment.TopCenter)
+                        .statusBarsPadding()
+                        .padding(top = 28.dp)
+                        .clip(RoundedCornerShape(20.dp))
+                        .background(Color(0xFF0F172A).copy(alpha = 0.88f))
+                        .border(1.dp, Color(0xFF10B981).copy(alpha = 0.6f), RoundedCornerShape(20.dp))
+                        .padding(horizontal = 14.dp, vertical = 6.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Box(
+                        modifier = Modifier
+                            .size(8.dp)
+                            .clip(CircleShape)
+                            .background(Color(0xFF10B981))
+                    )
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Text(
+                        text = "SCREEN SHARING ACTIVE",
+                        fontSize = 11.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = Color.White,
+                        letterSpacing = 0.8.sp
+                    )
+                    Spacer(modifier = Modifier.width(12.dp))
+                    Text(
+                        text = "Stop Share",
+                        fontSize = 11.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = Color(0xFFF87171),
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(8.dp))
+                            .background(Color(0xFFEF4444).copy(alpha = 0.18f))
+                            .clickable { com.example.LiveVoiceManager.stopScreenShare() }
+                            .padding(horizontal = 8.dp, vertical = 3.dp)
+                    )
                 }
-            )
+            }
+
+            val jarvisVisualizerState = when (state) {
+                VoiceSessionState.IDLE -> JarvisVisualizerState.IDLE
+                VoiceSessionState.LISTENING -> JarvisVisualizerState.LISTENING
+                VoiceSessionState.PROCESSING -> JarvisVisualizerState.THINKING
+                VoiceSessionState.SPEAKING -> JarvisVisualizerState.SPEAKING
+            }
+
+            // 3D Live JARVIS Particle Orb Visualizer (Center of Screen)
+            Box(
+                modifier = Modifier
+                    .size(320.dp),
+                contentAlignment = Alignment.Center
+            ) {
+                Jarvis3dLiveVisualizer(
+                    mode = JarvisVisualizerMode.PARTICLE_ORB,
+                    state = jarvisVisualizerState,
+                    audioAmplitude = amplitude,
+                    onOrbTap = {
+                        if (state == VoiceSessionState.SPEAKING) {
+                            engine.stopSpeaking()
+                        }
+                    },
+                    modifier = Modifier.fillMaxSize()
+                )
+            }
 
             // Subtitles and status readout at bottom
             Column(

@@ -210,7 +210,7 @@ object TTSManager : TextToSpeech.OnInitListener {
         val isHinglish = isHinglishOrHindi(clean)
         val hasExcitement = clean.contains("!") || clean.contains("Bilkul", ignoreCase = true)
 
-        val profile = VOICE_PROFILES.find { it.id == voiceId } ?: VOICE_PROFILES.first()
+        val profile = VOICE_PROFILES.find { it.id == voiceId || (voiceId == "Fenrir" && it.id == "Kabir") } ?: VOICE_PROFILES.first()
         applyProfile(profile, isHinglish = isHinglish, hasDevanagari = hasDevanagari, hasExcitement = hasExcitement)
 
         _currentlySpeakingText.value = text
@@ -258,12 +258,12 @@ object TTSManager : TextToSpeech.OnInitListener {
         }
 
         val prefs = context.getSharedPreferences("VoiceSettings", Context.MODE_PRIVATE)
-        val selectedVoiceId = prefs.getString("selected_voice_id", "Zephyr") ?: "Zephyr"
+        val selectedVoiceId = prefs.getString("selected_voice_id", "Kabir") ?: "Kabir"
 
         val hasDevanagari = cleanText.any { it in '\u0900'..'\u097F' }
         val isHinglish = isHinglishOrHindi(cleanText)
         val hasExcitement = cleanText.contains("!") || cleanText.contains("Bilkul", ignoreCase = true) || cleanText.contains("Super", ignoreCase = true)
-        val profile = VOICE_PROFILES.find { it.id == selectedVoiceId } ?: VOICE_PROFILES.first()
+        val profile = VOICE_PROFILES.find { it.id == selectedVoiceId || (selectedVoiceId == "Fenrir" && it.id == "Kabir") } ?: VOICE_PROFILES.first()
         
         applyProfile(profile, isHinglish = isHinglish, hasDevanagari = hasDevanagari, hasExcitement = hasExcitement)
 
@@ -364,6 +364,10 @@ object TTSManager : TextToSpeech.OnInitListener {
         // 13. Smooth Hinglish phonetics and collapse stuttering characters
         text = smoothTextForHinglish(text)
 
+        if (text.isBlank() && hasImageMarkdown) {
+            return "Maine aapke liye image generate kar di hai."
+        }
+
         return text
     }
 
@@ -379,42 +383,70 @@ object TTSManager : TextToSpeech.OnInitListener {
             "$ch$ch"
         }
 
-        // 2. Normalize chat shorthand to phonetically clear, smooth words that TTS pronounces without hesitation
+        // 2. Normalize symbols that trip up TTS engines into natural spoken words
+        text = text.replace("&", " aur ")
+            .replace("/", " ya ")
+            .replace("+", " plus ")
+            .replace("%", " percent ")
+            .replace("~", " ")
+            .replace("=", " barabar ")
+            .replace("|", " ")
+
+        // 3. Normalize chat shorthand to phonetically clear, smooth words that TTS pronounces without hesitation
         val replacements = listOf(
             Regex("""\bhr+l+o+\b""", RegexOption.IGNORE_CASE) to "hello",
             Regex("""\bbtaiye\b""", RegexOption.IGNORE_CASE) to "bataiye",
             Regex("""\bbtao\b""", RegexOption.IGNORE_CASE) to "batao",
             Regex("""\bnhi\b""", RegexOption.IGNORE_CASE) to "nahi",
+            Regex("""\bnhn\b""", RegexOption.IGNORE_CASE) to "nahi",
+            Regex("""\bnahe\b""", RegexOption.IGNORE_CASE) to "nahi",
             Regex("""\bbhot\b""", RegexOption.IGNORE_CASE) to "bahut",
             Regex("""\bbohot\b""", RegexOption.IGNORE_CASE) to "bahut",
+            Regex("""\bbht\b""", RegexOption.IGNORE_CASE) to "bahut",
             Regex("""\bkro\b""", RegexOption.IGNORE_CASE) to "karo",
+            Regex("""\bkrna\b""", RegexOption.IGNORE_CASE) to "karna",
             Regex("""\bkrein\b""", RegexOption.IGNORE_CASE) to "karein",
             Regex("""\bkr\b""", RegexOption.IGNORE_CASE) to "kar",
+            Regex("""\bkregi\b""", RegexOption.IGNORE_CASE) to "karegi",
+            Regex("""\bkrega\b""", RegexOption.IGNORE_CASE) to "karega",
             Regex("""\byrr+\b""", RegexOption.IGNORE_CASE) to "yaar",
+            Regex("""\byar\b""", RegexOption.IGNORE_CASE) to "yaar",
             Regex("""\bplz\b""", RegexOption.IGNORE_CASE) to "please",
             Regex("""\bpls\b""", RegexOption.IGNORE_CASE) to "please",
-            Regex("""\bthnx\b""", RegexOption.IGNORE_CASE) to "thanks",
-            Regex("""\bthx\b""", RegexOption.IGNORE_CASE) to "thanks",
+            Regex("""\bthnx\b""", RegexOption.IGNORE_CASE) to "dhanyawaad",
+            Regex("""\bthx\b""", RegexOption.IGNORE_CASE) to "dhanyawaad",
             Regex("""\bkyu\b""", RegexOption.IGNORE_CASE) to "kyon",
             Regex("""\bkyun\b""", RegexOption.IGNORE_CASE) to "kyon",
-            Regex("""\bacha\b""", RegexOption.IGNORE_CASE) to "achha",
+            Regex("""\bachhi\b""", RegexOption.IGNORE_CASE) to "acchi",
+            Regex("""\bachhe\b""", RegexOption.IGNORE_CASE) to "acche",
             Regex("""\bthk\b""", RegexOption.IGNORE_CASE) to "theek",
             Regex("""\bsb\b""", RegexOption.IGNORE_CASE) to "sab",
             Regex("""\bhnn\b""", RegexOption.IGNORE_CASE) to "haan",
             Regex("""\bhn\b""", RegexOption.IGNORE_CASE) to "haan",
             Regex("""\bapka\b""", RegexOption.IGNORE_CASE) to "aapka",
-            Regex("""\bapki\b""", RegexOption.IGNORE_CASE) to "aapki"
+            Regex("""\bapki\b""", RegexOption.IGNORE_CASE) to "aapki",
+            Regex("""\bapke\b""", RegexOption.IGNORE_CASE) to "aapke",
+            Regex("""\bapse\b""", RegexOption.IGNORE_CASE) to "aapse",
+            Regex("""\bchahiye\b""", RegexOption.IGNORE_CASE) to "chaahiye",
+            Regex("""\bsmjh\b""", RegexOption.IGNORE_CASE) to "samajh",
+            Regex("""\bsmjho\b""", RegexOption.IGNORE_CASE) to "samjho",
+            Regex("""\bkch\b""", RegexOption.IGNORE_CASE) to "kuch",
+            Regex("""\blg\b""", RegexOption.IGNORE_CASE) to "lag",
+            Regex("""\brha\b""", RegexOption.IGNORE_CASE) to "raha",
+            Regex("""\brhi\b""", RegexOption.IGNORE_CASE) to "rahi",
+            Regex("""\brhe\b""", RegexOption.IGNORE_CASE) to "rahe"
         )
         for ((regex, replacement) in replacements) {
             text = text.replace(regex, replacement)
         }
 
-        // 3. Convert multi-dots or stutter punctuation into smooth breathing comma pauses
+        // 4. Convert multi-dots or stutter punctuation into smooth breathing comma pauses
         text = text.replace(Regex("""\.\.\.+"""), ", ")
         text = text.replace(Regex("""\?\?+"""), "? ")
         text = text.replace(Regex("""!!+"""), "! ")
+        text = text.replace(Regex("""--+"""), ", ")
 
-        // 4. Ensure comma and periods have a trailing space for natural breath pauses
+        // 5. Ensure comma and periods have a trailing space for natural breath pauses
         text = text.replace(Regex("""([,.:;!?])(?=[a-zA-Z0-9])"""), "$1 ")
         text = text.replace(Regex("""\s+"""), " ").trim()
 

@@ -263,7 +263,7 @@ fun SaifAiEditingModal(
                         .fillMaxWidth()
                         .clip(RoundedCornerShape(12.dp))
                 ) {
-                    val tabTitles = listOf("⚡ Prompt Edit", "🎬 Video Reference", "📝 Script Writer", "✨ Zero-to-Video", "🛠️ AI Pro", "✈️ Telegram Assets")
+                    val tabTitles = listOf("✨ ZERO TO VIDEO", "🎬 VIDEO TO EDIT", "🎙️ VIDEO EDIT WITH AI VOICES", "🗣️ VOICE OVER TO VIDEO", "🛠️ AI Pro", "✈️ Telegram Assets")
                     tabTitles.forEachIndexed { index, title ->
                         Tab(
                             selected = selectedTab == index,
@@ -284,7 +284,38 @@ fun SaifAiEditingModal(
 
                 // Tab Content Switcher
                 when (selectedTab) {
-                    0 -> PromptSeEditTab(
+                    0 -> ZeroToVideoTab(
+                        prompt = zeroPrompt,
+                        onPromptChange = { zeroPrompt = it },
+                        onStartZeroToVideo = {
+                            if (zeroPrompt.isBlank()) {
+                                Toast.makeText(context, "Enter an idea prompt!", Toast.LENGTH_SHORT).show()
+                                return@ZeroToVideoTab
+                            }
+                            isZeroProcessing = true
+                            zeroProgress = 0.1f
+                            scope.launch {
+                                val res = SaifAiEditingEngine.generateZeroToVideo(
+                                    context = context,
+                                    prompt = zeroPrompt,
+                                    onStepUpdate = { step, prog ->
+                                        zeroCurrentStep = step
+                                        zeroProgress = prog
+                                    }
+                                )
+                                res.onSuccess { newProject ->
+                                    onApplyEdit(newProject)
+                                    isZeroProcessing = false
+                                    Toast.makeText(context, "🎉 Full video ready on timeline!", Toast.LENGTH_LONG).show()
+                                    onDismiss()
+                                }.onFailure {
+                                    isZeroProcessing = false
+                                    Toast.makeText(context, "Error generating video: ${it.message}", Toast.LENGTH_SHORT).show()
+                                }
+                            }
+                        }
+                    )
+                    1 -> PromptSeEditTab(
                         prompt = promptText,
                         onPromptChange = { promptText = it },
                         refNote = referenceNote,
@@ -320,12 +351,6 @@ fun SaifAiEditingModal(
                             }
                         }
                     )
-                    1 -> VideoDekarEditTab(
-                        onSelectReference = { note ->
-                            promptText = "Match style from reference: $note"
-                            selectedTab = 0
-                        }
-                    )
                     2 -> ScriptWriterTab(
                         idea = scriptIdea,
                         onIdeaChange = { scriptIdea = it },
@@ -345,39 +370,16 @@ fun SaifAiEditingModal(
                         },
                         onApplyScriptToTimeline = { script ->
                             promptText = "Edit project to match script: ${script.title}"
-                            selectedTab = 0
+                            selectedTab = 1
                             Toast.makeText(context, "Script attached to AI Editor!", Toast.LENGTH_SHORT).show()
                         }
                     )
-                    3 -> ZeroToVideoTab(
-                        prompt = zeroPrompt,
-                        onPromptChange = { zeroPrompt = it },
-                        onStartZeroToVideo = {
-                            if (zeroPrompt.isBlank()) {
-                                Toast.makeText(context, "Enter an idea prompt!", Toast.LENGTH_SHORT).show()
-                                return@ZeroToVideoTab
-                            }
-                            isZeroProcessing = true
-                            zeroProgress = 0.1f
-                            scope.launch {
-                                val res = SaifAiEditingEngine.generateZeroToVideo(
-                                    context = context,
-                                    prompt = zeroPrompt,
-                                    onStepUpdate = { step, prog ->
-                                        zeroCurrentStep = step
-                                        zeroProgress = prog
-                                    }
-                                )
-                                res.onSuccess { newProject ->
-                                    onApplyEdit(newProject)
-                                    isZeroProcessing = false
-                                    Toast.makeText(context, "🎉 Full video ready on timeline!", Toast.LENGTH_LONG).show()
-                                    onDismiss()
-                                }.onFailure {
-                                    isZeroProcessing = false
-                                    Toast.makeText(context, "Error generating video: ${it.message}", Toast.LENGTH_SHORT).show()
-                                }
-                            }
+                    3 -> VoiceOverToVideoModalTab(
+                        project = project,
+                        onApply = { updated ->
+                            onApplyEdit(updated)
+                            Toast.makeText(context, "🎬 Video generated from Voiceover!", Toast.LENGTH_LONG).show()
+                            onDismiss()
                         }
                     )
                     4 -> AiProToolsTab(
@@ -387,36 +389,22 @@ fun SaifAiEditingModal(
                             showAutoCutDialog = true
                         },
                         onAutoCaptions = {
-                            val updated = project.copy(
-                                autoCaptions = listOf(
-                                    VideoCaptionItem(
-                                        startSeconds = 0.5f,
-                                        endSeconds = 4.0f,
-                                        text = "WELCOME TO SAIF AI STUDIO",
-                                        words = listOf("WELCOME", "TO", "SAIF", "AI", "STUDIO")
-                                    ),
-                                    VideoCaptionItem(
-                                        startSeconds = 4.5f,
-                                        endSeconds = 8.0f,
-                                        text = "NEURAL KARAOKE SYNC READY",
-                                        words = listOf("NEURAL", "KARAOKE", "SYNC", "READY")
-                                    )
-                                )
-                            )
+                            val captions = SaifAiEditingEngine.generateWordLevelAutoCaptions(project)
+                            val updated = project.copy(autoCaptions = captions)
                             onApplyEdit(updated)
-                            Toast.makeText(context, "✅ AI Subtitle track generated!", Toast.LENGTH_SHORT).show()
+                            Toast.makeText(context, "✅ AI Word-Level Captions generated (${captions.size} segments)!", Toast.LENGTH_SHORT).show()
                             onDismiss()
                         },
                         onAutoReframe = { ratio ->
-                            val updated = project.copy(aspectRatio = ratio)
+                            val updated = SaifAiEditingEngine.applyAutoReframe(project, ratio)
                             onApplyEdit(updated)
                             Toast.makeText(context, "✅ Reframed video to $ratio", Toast.LENGTH_SHORT).show()
                             onDismiss()
                         },
                         onAutoDuck = {
-                            val updated = project.copy(audioDuckAmount = 0.25f)
+                            val updated = SaifAiEditingEngine.applySmartAudioDucking(project, 0.30f)
                             onApplyEdit(updated)
-                            Toast.makeText(context, "✅ Auto audio-ducking enabled", Toast.LENGTH_SHORT).show()
+                            Toast.makeText(context, "✅ Smart audio-ducking enabled", Toast.LENGTH_SHORT).show()
                             onDismiss()
                         }
                     )
@@ -451,7 +439,7 @@ fun SaifAiEditingModal(
                                     Toast.makeText(context, "🎵 Attached ${asset.title} as Background Track!", Toast.LENGTH_SHORT).show()
                                 } else if (asset.type == "video" || asset.type == "image") {
                                     val updated = project.copy(
-                                        overlayMediaUri = path.ifBlank { "android.resource://${context.packageName}/raw/cyber_sample" },
+                                        overlayMediaUri = path,
                                         activePipPosition = "Bottom-Right"
                                     )
                                     onApplyEdit(updated)
@@ -484,13 +472,8 @@ fun SaifAiEditingModal(
             segments = silenceSegments,
             onDismiss = { showAutoCutDialog = false },
             onApply = { approvedSegments ->
-                // Apply ripple silence cuts
-                val updatedClips = project.clips.map { clip ->
-                    clip.copy(durationSeconds = (clip.durationSeconds - 0.8f).coerceAtLeast(1.0f))
-                }
-                val totalSaved = approvedSegments.size * 1.2f
-                val newDur = (project.totalDurationSeconds - totalSaved).coerceAtLeast(4f)
-                onApplyEdit(project.copy(clips = updatedClips, totalDurationSeconds = newDur))
+                val updated = SaifAiEditingEngine.applySilenceAutoCut(project, approvedSegments)
+                onApplyEdit(updated)
                 showAutoCutDialog = false
                 Toast.makeText(context, "✂️ Removed ${approvedSegments.size} silent pauses!", Toast.LENGTH_LONG).show()
                 onDismiss()
@@ -924,6 +907,126 @@ fun ZeroToVideoTab(
                     Spacer(modifier = Modifier.width(8.dp))
                     Text("BUILD ZERO-TO-VIDEO NOW", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 13.5.sp)
                 }
+            }
+        }
+    }
+}
+
+@Composable
+fun VoiceOverToVideoModalTab(
+    project: VideoProjectData,
+    onApply: (VideoProjectData) -> Unit
+) {
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+    var narrationText by remember {
+        mutableStateOf("Step into the future of autonomous video intelligence. High precision pacing, synchronized subtitles, and fluid transitions.")
+    }
+    var selectedTone by remember { mutableStateOf("Cinematic Deep") }
+    var isBuilding by remember { mutableStateOf(false) }
+
+    val tones = listOf("Cinematic Deep", "Energetic & Bold", "Warm Storyteller", "Aarav Hindi", "Crisp Tech")
+
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .padding(16.dp),
+        verticalArrangement = Arrangement.spacedBy(14.dp)
+    ) {
+        Text("Voice Over to Video Scene Synthesis", color = Color.White, fontSize = 15.sp, fontWeight = FontWeight.Bold)
+
+        OutlinedTextField(
+            value = narrationText,
+            onValueChange = { narrationText = it },
+            label = { Text("Narration Script or Spoken Voiceover") },
+            placeholder = { Text("Type narration text...") },
+            modifier = Modifier.fillMaxWidth(),
+            minLines = 3,
+            maxLines = 5,
+            colors = OutlinedTextFieldDefaults.colors(
+                focusedBorderColor = Color(0xFF00DAF3),
+                unfocusedBorderColor = Color(0x35FFFFFF),
+                focusedTextColor = Color.White,
+                unfocusedTextColor = Color.White
+            )
+        )
+
+        Text("Select AI Voice Character", color = Color(0xFFCCC3D9), fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
+        Row(
+            modifier = Modifier.horizontalScroll(rememberScrollState()),
+            horizontalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            tones.forEach { tone ->
+                val isSel = selectedTone == tone
+                Surface(
+                    onClick = { selectedTone = tone },
+                    shape = RoundedCornerShape(10.dp),
+                    color = if (isSel) Color(0xFF7B2BFF) else Color(0xFF1B1528),
+                    border = BorderStroke(1.dp, if (isSel) Color(0xFF00DAF3) else Color(0x22FFFFFF))
+                ) {
+                    Text(
+                        text = tone,
+                        color = Color.White,
+                        fontSize = 11.5.sp,
+                        fontWeight = if (isSel) FontWeight.Bold else FontWeight.Normal,
+                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp)
+                    )
+                }
+            }
+        }
+
+        Surface(
+            shape = RoundedCornerShape(12.dp),
+            color = Color(0xFF1B1528),
+            modifier = Modifier.fillMaxWidth()
+        ) {
+            Column(modifier = Modifier.padding(12.dp)) {
+                Text("How Voice Over to Video Works:", color = Color(0xFF00DAF3), fontSize = 11.5.sp, fontWeight = FontWeight.Bold)
+                Spacer(modifier = Modifier.height(4.dp))
+                Text(
+                    "• Splits script into thought clauses\n• Synthesizes matching video clips on timeline\n• Creates synchronized subtitles & auto-ducks audio",
+                    color = Color(0xFFCCC3D9),
+                    fontSize = 11.sp,
+                    lineHeight = 16.sp
+                )
+            }
+        }
+
+        Spacer(modifier = Modifier.weight(1f))
+
+        Button(
+            onClick = {
+                if (narrationText.isBlank()) {
+                    Toast.makeText(context, "Enter narration text!", Toast.LENGTH_SHORT).show()
+                    return@Button
+                }
+                isBuilding = true
+                scope.launch {
+                    delay(600)
+                    val words = narrationText.split("\\s+".toRegex()).size
+                    val totalSec = (words / 130f * 60f).coerceIn(4f, 60f)
+                    val edl = SaifAiEditingEngine.synthesizeAlgorithmicEdl(narrationText, emptyList())
+                    val newProj = SaifAiEditingEngine.convertEdlToProject(context, edl, narrationText)
+                    val updated = newProj.copy(
+                        projectName = narrationText.take(24),
+                        totalDurationSeconds = totalSec,
+                        textOverlay = narrationText.take(28).uppercase()
+                    )
+                    isBuilding = false
+                    onApply(updated)
+                }
+            },
+            enabled = !isBuilding,
+            shape = RoundedCornerShape(16.dp),
+            colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF00DAF3)),
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(50.dp)
+        ) {
+            if (isBuilding) {
+                CircularProgressIndicator(color = Color.Black, modifier = Modifier.size(20.dp))
+            } else {
+                Text("BUILD VIDEO FROM VOICEOVER", color = Color.Black, fontWeight = FontWeight.Bold, fontSize = 13.5.sp)
             }
         }
     }

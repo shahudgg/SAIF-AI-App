@@ -67,12 +67,15 @@ fun AISettingsDialog(
                     }
                 }
                 Spacer(modifier = Modifier.height(12.dp))
-                Box(
+                Column(
                     modifier = Modifier
                         .weight(1f)
                         .verticalScroll(rememberScrollState())
                 ) {
                     AiProviderSettingsInline()
+                    Spacer(modifier = Modifier.height(16.dp))
+                    JarvisAutomationSettingsCard(isDarkTheme = isDarkTheme)
+                    Spacer(modifier = Modifier.height(24.dp))
                 }
             }
         }

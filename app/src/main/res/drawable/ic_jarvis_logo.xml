@@ -1,0 +1,27 @@
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="96dp"
+    android:height="96dp"
+    android:viewportWidth="96"
+    android:viewportHeight="96">
+    <!-- Outer Glow Ring -->
+    <path
+        android:fillColor="#332563EB"
+        android:pathData="M48,8 A40,40 0 1,0 48,88 A40,40 0 1,0 48,8 Z" />
+    <!-- Outer Arc Ring -->
+    <path
+        android:strokeColor="#2563EB"
+        android:strokeWidth="3"
+        android:pathData="M48,14 A34,34 0 1,0 48,82 A34,34 0 1,0 48,14 Z" />
+    <!-- Hexagonal Core / Reactor -->
+    <path
+        android:fillColor="#1D4ED8"
+        android:pathData="M48,22 L70,35 L70,61 L48,74 L26,61 L26,35 Z" />
+    <!-- Inner Core -->
+    <path
+        android:fillColor="#60A5FA"
+        android:pathData="M48,30 L63,39 L63,57 L48,66 L33,57 L33,39 Z" />
+    <!-- Center Bright Dot -->
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M48,40 A8,8 0 1,0 48,56 A8,8 0 1,0 48,40 Z" />
+</vector>

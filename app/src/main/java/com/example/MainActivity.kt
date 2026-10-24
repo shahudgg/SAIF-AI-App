@@ -70,6 +70,7 @@ class MainActivity : ComponentActivity() {
         com.example.util.WakeWordManager.init(applicationContext)
         com.example.util.SmartConversationMemory.init(applicationContext)
         com.example.util.SaifBroadcastNotificationHelper.initNotificationChannel(applicationContext)
+        com.jarvis.assistant.JarvisApp.init(applicationContext)
 
         enableEdgeToEdge()
         WindowCompat.setDecorFitsSystemWindows(window, false)
